@@ -1064,11 +1064,11 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-d7f093d630716353ee8de2c18ad76bd5c28953db
-docs: correct stale sections in the handoff and sync both READMEs
+f250a4fb1a735cf9dd9187237796215374390287
+feat: risk management and position sizing, and fix the tick value divisor
 ```
 
-**Push status: SUCCESS** — `2ea3954..d7f093d  main -> main` on
+**Push status: SUCCESS** — `631ec6a..f250a4f  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
 
@@ -1077,14 +1077,26 @@ afterwards and matches the local head exactly.
 > commit that records the hash is not possible. The authoritative head is
 > `git log --oneline -n 1`, and the `## Git Status` list above is the one to
 > trust for history.
-```
-6e264a25f198cdf68a1d50db074906c9ea002751
-feat: al brooks signal adapter, deterministic signal identity, mapping tests
-```
 
-**Push status: SUCCESS** — `8e4431e..6e264a2  main -> main` on
-`git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
-afterwards and matches the local head exactly.
+### What could not be verified on this machine
+
+Recorded rather than glossed over, because the alternative is a handoff that
+claims more than anyone checked:
+
+* **`pytest tests/integration` did not run.** The nine tests against the real
+  `Analyzer` collect only when `albrooks` is installed, and it is not installed
+  here — the module skips at import. The previous phase verified them green and
+  Phase 4 touches no adapter code, so they are *expected* to be unchanged. They
+  have **not** been run. Run `pytest tests/integration -v` on a machine with the
+  upstream checkout before relying on that.
+* **The MT5 terminal build is unknown.** This machine has Alpari MT5 `_4`, and
+  `auto-trade`'s control ids were measured on build 6184. Nothing was clicked and
+  no terminal was opened, so nothing is broken — but Known Issue 5 is unresolved
+  and Phase 11 owns it.
+* **No upstream checkouts exist here.** `E:\al-brooks-price-action-engine` and
+  `E:\auto-trade` from the old environment section are gone; this machine has
+  neither. `scripts/setup.ps1` has not been run.
+
 ---
 
 ## Chronological History
