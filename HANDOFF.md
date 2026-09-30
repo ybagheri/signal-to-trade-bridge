@@ -12,21 +12,20 @@
 
 ## Current Status
 
-**Phases 0, 1 and 2 complete. Phase 3 not started.**
+**Phases 0, 1, 2 and 3 complete. Phase 4 not started.**
 
-Phase 0 was a repository audit. Phase 1 built the foundation. Phase 2 built the
-first adapter — the Al Brooks signal source — which is where the anti-corruption
-layer either becomes real or stays notional. It is real, and it is tested against
-both a hand-written stub and the real upstream engine.
+Phase 0 audited the upstream repositories. Phase 1 built the foundation. Phase 2
+built the first adapter. Phase 3 gave the domain its **policies**: stop
+resolution, take-profit policy, and validation.
 
-**245 tests passing.** Lint, format, type check and the domain-isolation check all
-clean. The suite runs **without `albrooks` installed**, which is the property that
-makes it a safety net rather than a souvenir.
+**432 tests passing, 94% coverage.** The four files this phase added have
+**100% statement coverage**. Lint, format, type check and the domain-isolation
+check all clean. The suite still runs **without `albrooks` installed**.
 
 ```
-Last completed phase: 2
-Current phase:        3 (not started)
-Next phase:           3 — internal trading domain (risk and take-profit policy)
+Last completed phase: 3
+Current phase:        4 (not started)
+Next phase:           4 — risk management and position sizing
 ```
 
 ---
@@ -36,7 +35,7 @@ Next phase:           3 — internal trading domain (risk and take-profit policy
 - [x] **Phase 0** — Repository discovery and architecture audit
 - [x] **Phase 1** — Project foundation
 - [x] **Phase 2** — Al Brooks signal adapter
-- [ ] Phase 3 — Internal trading domain
+- [x] **Phase 3** — Stop, take-profit and validation policies
 - [ ] Phase 4 — Risk management
 - [ ] Phase 5 — 1:1 risk/reward
 - [ ] Phase 6 — Trade validation pipeline
@@ -47,6 +46,88 @@ Next phase:           3 — internal trading domain (risk and take-profit policy
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
+
+---
+
+## What Phase 3 Built
+
+```
+domain/
+  resolution.py   Resolution[T]             the two-outcome result type
+  stops.py        resolve_stop()            stop policy
+  take_profit.py  resolve_take_profit()     take-profit policy
+  validation.py   validate_signal()         four validation layers
+                                          validate_geometry()
+                                          validate_policy()
+                                          validate_against_spec()
+tests/unit/
+  test_resolution.py        22 tests
+  test_stop_resolution.py   56 tests
+  test_take_profit_policy.py 50 tests
+  test_validation.py        48 tests
+  test_defensive_guards.py   7 tests
+docs/risk-management.md
+```
+
+`Resolution` is modelled once rather than four times. Failures are **values, not
+exceptions** — a missing stop is the commonest outcome in the system, not an
+exceptional condition.
+
+### Design decisions Phase 3 made
+
+- **Success is an explicit flag on `Resolution`, not `value is not None`.** A
+  take-profit step can legitimately succeed with the answer "there is no take
+  profit", and inferring success from the value made that indistinguishable from a
+  refusal. A log full of refusals for a deliberate configuration trains people to
+  ignore the reason codes.
+- **A missing stop and a zero stop share one reason code**, because the upstream
+  engine uses `0.0` to mean "no stop". Two codes would make an alert fire twice
+  for one fault.
+- **A level at the entry is a distance problem, not a side problem** — for both
+  the stop and the take profit. Reported as "wrong side" it would point an
+  operator at a sign error that is not there.
+- **An unrecognised basis is refused even when volatility fallbacks are
+  permitted.** The flag names one specific alternative, not a general licence, and
+  the refusal message says so because the two cases have different remedies.
+- **`Resolution.details` is a read-only mapping.** A decision record that could be
+  edited after the fact would not be a record.
+- **Geometry validation duplicates the stop-side check deliberately.** The two
+  functions have different callers, and a check that trusts its input to have been
+  verified elsewhere fails the first time somebody calls it directly.
+- **The stop, target and tick-size vocabularies moved from the adapter into the
+  domain.** Deciding what counts as a defensible stop is a trading policy, and a
+  policy living in an adapter would change whenever someone edited a mapping. The
+  adapter now reads upstream strings; the domain interprets them.
+
+### Bugs Phase 3 found
+
+Three, all fixed. Recorded because each is a failure mode a later phase could
+reintroduce.
+
+1. **A missing stop escaped as a `ValueError` instead of a reason code.**
+   `resolve_stop` passed a zero price straight to `StopLoss`, whose own validation
+   raises. So the *commonest outcome in the system* — a signal with no stop —
+   arrived as an exception. A trading loop that caught `ValueError` here would be
+   handling an expected condition as a fault; one that did not would crash on a
+   quiet market.
+2. **`Resolution` could not express "succeeded with no value".** Found by the
+   `TakeProfitSource.NONE` tests, which is the only policy that resolves to
+   nothing. Fixed by the explicit `succeeded` flag described above.
+3. **A wrong-side stop discarded its computed distance** on the way out, because
+   the distance was calculated after the side check. The distance is the first
+   thing anyone looks at when asking why a stop was rejected, so it is now
+   computed before every check that can refuse.
+
+One test was wrong rather than the code, twice, and both times for the same
+reason — an assertion written against a value that Python silently rounds:
+
+* it expected five distinct refusal codes from the stop resolver and got four,
+  because a missing stop and a zero stop are the same fault. The test was
+  asserting a distinction the design deliberately does not make.
+* it compared a `Decimal` distance as a string, but `str(Decimal)` switches to
+  exponent notation below `1e-6` — `1E-11`, not `0.00000000001`. Both round-trip
+  exactly, so this is a test-formatting choice, not a defect, and the numeric
+  comparison is the honest one.
 
 ---
 
@@ -341,49 +422,71 @@ What exists and works:
 - **245 tests**, in about 1.3 seconds, with no MetaTrader terminal, no network and
   no upstream project required.
 
-**Documentation**: architecture, integration contracts, setup, signal flow,
-bilingual README.
+**Phase 3 — the policies**
 
-**Not yet implemented, and not to be assumed: any part of the decision pipeline
-past step 2.** A signal is read, normalised and logged — and then goes nowhere.
-There is no risk calculation, no position size, no validation, no dry run and no
-execution. Phases 3 through 8 build the rest of the path.
+- **Stop resolution**, with the no-invented-stop rule enforced by an AST test
+  rather than by convention. Structural bases are used, `ATR_FALLBACK` is refused
+  by default, and an unrecognised basis is refused even when the fallback flag is
+  set.
+- **Take-profit policy** with four modes, where a fallback is never silent and the
+  *achieved* ratio is reported rather than the configured one.
+- **Four validation layers**: the signal, the geometry, the configured policy, and
+  what the symbol can express.
+- **A `Resolution` type** for the two-outcome shape, with failures as values,
+  success as an explicit flag, and read-only details.
+- **432 tests, 94% coverage**; the four new files at 100%.
 
-The honest summary: the bridge can currently *understand* a signal and say what it
-would need in order to trade it. It cannot trade it.
+**Documentation**: architecture, integration contracts, setup, signal flow, risk
+management, bilingual README.
+
+**Not yet implemented, and not to be assumed: position sizing.** Everything up to
+and including validation works. The moment a trade would be sized, the pipeline
+stops, because there is no account balance and no symbol specification to size it
+from — neither upstream project has either. Phases 4 and 7 build those.
+
+The honest summary: the bridge can **understand** a signal, **validate** it, and
+say exactly what it would need in order to trade it. It cannot yet size it, and
+therefore cannot trade it.
 
 ---
 
 ## Tests
 
-**245 tests, all passing, in about 1.3 seconds.** The suite runs **without
+**432 tests, all passing, in about 1.5 seconds.** The suite runs **without
 `albrooks` installed** and without MetaTrader 5, and the integration tests against
 the real engine skip cleanly.
 
 | File | Tests | Covers |
 |---|---|---|
 | `unit/test_albrooks_mapper.py` | 72 | The mapping, against stubs shaped like the real engine's output. |
+| `unit/test_stop_resolution.py` | 56 | The no-invented-stop rule, the basis policy, and every refusal path. |
 | `unit/test_domain_models.py` | 70 | Every value object, its validation, and its invariants. |
+| `unit/test_take_profit_policy.py` | 50 | The four policies, the ratio arithmetic, and provenance. |
+| `unit/test_validation.py` | 48 | The four validation layers, fail-closed behaviour. |
 | `unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
 | `unit/test_logging.py` | 28 | Redaction cannot be bypassed, JSON shape, handler hygiene, event vocabulary. |
+| `unit/test_resolution.py` | 22 | The two-outcome type, including success-with-no-value. |
 | `unit/test_albrooks_source.py` | 23 | Fetching, delegating, error paths, and the events emitted. |
 | `unit/test_ports.py` | 22 | Port narrowness, structural substitutability, annotation completeness. |
 | `unit/test_signal_identity.py` | 16 | Determinism, the bar-as-unit-of-identity, and the encoding. |
-| `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. |
+| `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `unit/test_domain_isolation.py` | 7 | The architectural invariant: the domain imports nothing external. |
-| **Total** | **245, 1 skipped** | |
+| `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. |
+| **Total** | **432, 1 skipped** | |
 
-Coverage: **90%** of statements. `ports/` shows 0% line coverage, which is expected
-for `Protocol` declarations and says nothing — `unit/test_ports.py` checks their
-contract instead.
+Coverage: **94%** of statements. The four files Phase 3 added —
+`resolution.py`, `stops.py`, `take_profit.py`, `validation.py` — are at
+**100%**. `ports/` shows 0% line coverage, which is expected for `Protocol`
+declarations and says nothing; `unit/test_ports.py` checks their contract instead.
 
 The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   44 files already formatted
-mypy                    Success: no issues found in 23 source files
-pytest                  245 passed, 1 skipped
+ruff format --check .   53 files already formatted
+mypy                    Success: no issues found in 27 source files
+pytest                  432 passed, 1 skipped
+pytest tests/integration  9 passed  (verified green against the real engine)
 ```
 
 `mypy` reports one informational note — an unused `[[tool.mypy.overrides]]` block
@@ -395,16 +498,24 @@ so the ignore is already there when the import arrives.
 live tests, and it applies here. Run `pytest tests/integration -v` explicitly
 before trusting an adapter change.
 
-The test counts here are a claim that every later change falsifies. **CI is the
-authority on what passes**; this table is a convenience.
+### Two tests worth knowing about
+
+`test_there_is_no_fallback_that_produces_a_stop` walks `stops.py`'s own AST and
+asserts that no numeric literal in it could serve as a price and that every
+`StopLoss` is built from the signal's own price. It is the enforcement behind the
+project's central rule, and it is the test a future contributor should read before
+adding anything to that module.
+
+`test_a_missing_evidence_score_is_refused_not_allowed_through` pins the
+fail-closed direction of the evidence filter. A missing value counting as a pass
+would make the filter trivially bypassable by any source that omitted the field.
 
 ### Tests deliberately not written yet
 
 Writing these before the code they test exists would be theatre:
 
 * position-sizing tests — Phase 4
-* stop and take-profit policy tests — Phases 4, 5
-* validation pipeline tests — Phase 6
+* the end-to-end pipeline — Phase 6
 * idempotency tests — Phase 9
 * end-to-end tests — Phase 10
 * live MT5 tests — Phase 11, and only behind an explicit opt-in marker
@@ -454,73 +565,79 @@ to fix without the maintainer's agreement.
 
 ## Remaining Work
 
-### Phase 3 — internal trading domain  ← next
+### Phase 4 — risk management and position sizing  ← next
 
-Phase 1 built the value objects; this phase gives them their **policies**. The
-brief lists Phase 3 as "internal trading domain" and Phase 4 as "risk
-management", and the natural split is:
-
-- **Phase 3** — the pure calculations and policies that need no market data:
-  stop resolution, take-profit resolution, and the validation rules. All of it
-  works on values already in hand.
-- **Phase 4** — everything that needs the account and the symbol: the risk amount,
-  the position sizer, and the broker constraint checks.
+**The substantial phase, and the one the whole project exists for.** Neither
+upstream project can supply any of it — verified in the Phase 0 audit — so this
+is new code, not adaptation.
 
 Files to create, all in `domain/`:
 
 | File | Contents |
 |---|---|
-| `stops.py` | `resolve_stop(signal, risk_parameters) -> StopLoss` plus the refusal reasons. Uses `StopSource` and `STRUCTURAL_STOP_BASES`, which already exist. |
-| `take_profit.py` | `resolve_take_profit(signal, stop, risk_parameters) -> TakeProfit`, honouring `TakeProfitSource`. |
-| `validation.py` | Geometry checks: stop on the wrong side, target on the wrong side, zero distance, non-positive prices. |
+| `risk.py` | The risk amount from a balance and a percentage, and the refusals when a balance or a specification is unavailable. |
+| `sizing.py` | The tick-value position sizer, step rounding, and the broker constraints. |
 
-The stop policy, from `docs/architecture.md §5.4`:
+The formula, from `docs/architecture.md §5.6`:
 
-1. Use the signal's stop when `stop_basis` is structural.
-2. **Refuse** an `ATR_FALLBACK` stop by default; `RiskParameters.allow_volatility_fallback_stop`
-   permits it, and when permitted the decision records
-   `StopSource.SIGNAL_VOLATILITY_FALLBACK` so the log says the stop was a
-   volatility multiple.
-3. A missing or non-positive stop is always `NO_VALID_STOP`. **No code path may
-   synthesise a stop.**
-4. The engine gives an absolute price, never a distance, so no conversion is
-   needed. The adapter is the only place that knows which form it received.
+```
+risk_amount      = balance × risk_percent / 100
+ticks            = |entry − stop| / tick_size
+risk_per_unit    = ticks × conservative_tick_value
+raw_volume       = risk_amount / risk_per_unit
+volume           = round_down_to_step(raw_volume)   then clamp to [min, max]
+```
 
-The take-profit policy, from §5.5:
+**Why tick-value based rather than a pip formula.** It is what makes the sizer
+correct for gold, indices, CFDs and futures-like instruments with no special
+cases. A 5-digit EURUSD and a 2-decimal XAUUSD both reach `$300` per lot over a
+stop, by completely different arithmetic — `0.00300 / 0.00001 × $1` and
+`3.00 / 0.01 × $1`. A sizer assuming a 100000 contract size and a 5-digit pair
+would be wrong on gold by two orders of magnitude.
 
-| `TakeProfitSource` | Behaviour |
-|---|---|
-| `RR_FALLBACK` (default) | Use the signal's target when `target_basis` is structural and the side is right; otherwise apply the ratio and record `RR_FALLBACK`. |
-| `SIGNAL` | Use the signal's target; refuse if unusable. |
-| `RR_DERIVED` | Ignore signal targets entirely. |
-| `NONE` | No take profit. |
+**Use the worse of `tick_value_profit` and `tick_value_loss`.** They can differ on
+a hedging account and on some CFDs. A size that is safe on paper has to be safe on
+the losing side.
 
-**A fallback is never silent.** `TakeProfit.source` records which path produced
-the number, so a log can never make a 1:1 target look like the engine's own
-measured move.
+### The rules Phase 4 must not break
 
-Also in this phase: `TradeIntent` construction, which is where the pieces meet.
+These are already enforced in Phases 1 and 3, and Phase 4 is where they become
+load-bearing:
 
-### Phase 4 — risk management and position sizing
+1. **A volume below `volume_min` is a refusal, never a floor-up.** Enforced twice:
+   `SymbolSpec.clamp_volume` returns zero below the minimum, and
+   `PositionSize.__post_init__` raises if `clamped_to_minimum` is ever set. A
+   sizer that can exceed its own budget is the failure this project exists to
+   prevent.
+2. **Round to `volume_step` down.** Rounding up can exceed the budget; down leaves
+   it fractionally under, which is the safe direction.
+3. **Clamping down to `volume_max` is allowed and must be recorded** — the real
+   risk is then *below* the budget, which is a fact the log should state.
+4. **`PositionSize` keeps every input.** A volume alone is not auditable; the
+   balance, percentage, stop distance, tick size and tick value that produced it
+   can be recomputed by hand.
 
-The substantial phase, and the one the whole project exists for. See
-`docs/architecture.md §5.6` for the formula and §9 for the invariants.
+### The adapter work Phase 4 also needs
 
-- `domain/sizing.py` — the tick-value position sizer. **No upstream project can
-  supply this**, verified in the audit.
-- `domain/risk.py` — the risk amount, and the refusal when a balance or a symbol
-  specification is unavailable.
-- Broker constraints: `volume_step` rounding **down**, `volume_max` clamping, and
-  a **refusal** when the volume lands below `volume_min`.
+`AccountProvider` and `SymbolSpecProvider` have no implementation yet, and the
+sizer cannot be tested end to end without them. Two options, and the decision
+belongs to the maintainer (Open Question 2):
 
-The rule that must survive: `PositionSize.clamped_to_minimum` raises if set, and
-`SymbolSpec.clamp_volume` returns zero below the minimum rather than flooring up.
-A sizer that can exceed its own budget is the failure this project exists to
-prevent.
+* a `FakeAccountProvider` / `FakeSymbolSpecProvider` in `adapters/fake/`, which
+  unblocks Phase 4's tests immediately
+* the real MT5 adapter in `adapters/mt5/`, which is Phase 7 work
+
+**Recommendation: write the fakes in Phase 4.** They are small, they unblock the
+tests that matter, and the real adapter in Phase 7 can then be written against
+tests that already pin the contract. Doing the real adapter first would mean
+writing it with nothing to check it against.
 
 ### Phases 5–13
 
-As laid out in `README.md`.
+As laid out in `README.md`. Note that Phase 5 (1:1 R:R) is **largely already
+implemented** — the take-profit policy in Phase 3 applies the configured ratio.
+Phase 5 should verify the wiring and add the missing coverage, not build a second
+mechanism.
 
 ---
 
@@ -732,26 +849,27 @@ afterwards and matches the local head exactly.
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **245 tests should pass.** If they do not,
+   virtual environment is not set up. **432 tests should pass.** If they do not,
    the repository is not in the state this file describes, and the repository
    wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
    (the safety invariants — later phases must not relax them)**.
 6. Read `docs/signal-flow.md` for what currently works and where the path stops.
-7. Read `docs/integration.md` §3 and §4 — the consolidated gaps and the
+7. Read `docs/risk-management.md` for the policies and the Phase 4 boundary.
+8. Read `docs/integration.md` §3 and §4 — the consolidated gaps and the
    do-not-assume checklist.
-8. Verify the actual repository state against this file. **If they conflict, the
+9. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 3** from the Remaining Work list above: `domain/stops.py`,
-`domain/take_profit.py` and `domain/validation.py`.
+**Then start Phase 4** from the Remaining Work list above: `domain/risk.py`,
+`domain/sizing.py`, and the fakes that unblock their tests.
 
-**A note on what Phase 3 is and is not.** It is *policies over values already in
-hand* — resolving a stop, resolving a take profit, checking geometry. It is **not**
-position sizing: that needs the account balance and the symbol specification,
-which is Phase 4. The distinction matters because a sizer written without market
-data would have to invent it, and inventing account facts is exactly what this
-project refuses to do.
+**Before writing the sizer, read
+[`tests/unit/test_stop_resolution.py::test_there_is_no_fallback_that_produces_a_stop`](tests/unit/test_stop_resolution.py).**
+It is the enforcement behind the project's central rule, and it will fail if
+anything in `stops.py` gains a numeric literal that could serve as a price. The
+same instinct applies to `sizing.py`: the sizer must not be able to invent an
+account balance or a tick value any more than the stop resolver invents a stop.
 
 **Standards for every phase, without exception:**
 
