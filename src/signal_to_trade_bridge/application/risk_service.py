@@ -110,14 +110,24 @@ class RiskService:
 
     # -- step 7: the risk amount -----------------------------------------
 
-    def risk_budget(
+    def budget_for(
         self,
+        balance: AccountBalance | None,
         risk: RiskParameters,
         *,
         symbol: str = "",
     ) -> Resolution[RiskBudget]:
-        """The maximum planned loss, with ``RISK_CALCULATED`` emitted either way."""
-        balance = self.read_account()
+        """The budget for an account the caller has already read.
+
+        The *resolve* half of step 7, separated from the *read* so that a decision
+        pipeline can take one account snapshot and use it for both this and the
+        concurrency gate. Reading twice is cheap against a local terminal and
+        still wrong: two reads can straddle a close, and the open-position count
+        that admitted the trade would not be the count that sized it.
+
+        ``None`` means "the account did not answer" and is refused -- the same
+        refusal :meth:`risk_budget` produces when its own read fails.
+        """
         resolution = resolve_risk_budget(balance, risk)
 
         fields: dict[str, Any] = {
@@ -144,7 +154,51 @@ class RiskService:
             self._log.warning(Event.RISK_CALCULATED, **fields)
         return resolution
 
+    def risk_budget(
+        self,
+        risk: RiskParameters,
+        *,
+        symbol: str = "",
+    ) -> Resolution[RiskBudget]:
+        """Read the account and resolve the budget, with ``RISK_CALCULATED`` either way."""
+        return self.budget_for(self.read_account(), risk, symbol=symbol)
+
     # -- step 8: the position size ---------------------------------------
+
+    def size_for(
+        self,
+        symbol: str,
+        stop: StopLoss,
+        budget: RiskBudget,
+        spec: SymbolSpec,
+    ) -> Resolution[PositionSize]:
+        """The volume from a budget and a specification the caller already read.
+
+        The resolve half of step 8, for the same reason as :meth:`budget_for`. Two
+        refusals are possible here rather than three, because both facts are now
+        in hand:
+
+        1. the account's money and the symbol's tick values are different
+           currencies, so the division would be meaningless;
+        2. the arithmetic itself -- a sub-minimum volume, an unusable stop, an
+           incomplete specification.
+
+        The first is *facts that contradict each other* and the second is a
+        verdict on a well-formed trade, which is why they are not merged into one
+        code.
+        """
+        currency = check_currency_compatibility(_account_for(budget), spec)
+        if not currency.ok:
+            return self._log_size(
+                symbol,
+                refused(
+                    currency.reason or RejectionReason.SYMBOL_SPEC_UNAVAILABLE,
+                    currency.explanation,
+                    **dict(currency.details),
+                ),
+            )
+
+        return self._log_size(symbol, resolve_position_size(stop, budget, spec))
 
     def position_size(
         self,
@@ -152,7 +206,7 @@ class RiskService:
         stop: StopLoss,
         risk: RiskParameters,
     ) -> Resolution[PositionSize]:
-        """The volume for this trade, with ``POSITION_SIZED`` emitted either way.
+        """Read the account and the symbol, then size. One call, no pipeline.
 
         Three refusals are possible before any arithmetic, in this order:
 
@@ -165,6 +219,11 @@ class RiskService:
         is *facts that contradict each other*. An operator debugging a refusal
         needs to know which they are looking at, and a single ``SIZING_FAILED``
         would not tell them.
+
+        Kept as one call for callers that do not need the facts earlier. A decision
+        pipeline should read each fact once and use ``budget_for`` and ``size_for``
+        instead, so the account and the specification are a single snapshot per
+        decision rather than two.
         """
         budget_resolution = self.risk_budget(risk, symbol=symbol)
         if not budget_resolution.ok:
@@ -196,18 +255,7 @@ class RiskService:
                 ),
             )
 
-        currency = check_currency_compatibility(_account_for(budget), spec)
-        if not currency.ok:
-            return self._log_size(
-                symbol,
-                refused(
-                    currency.reason or RejectionReason.SYMBOL_SPEC_UNAVAILABLE,
-                    currency.explanation,
-                    **dict(currency.details),
-                ),
-            )
-
-        return self._log_size(symbol, resolve_position_size(stop, budget, spec))
+        return self.size_for(symbol, stop, budget, spec)
 
     def _log_size(
         self,
