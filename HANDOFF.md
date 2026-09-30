@@ -627,9 +627,11 @@ itself must work on a laptop where nothing lives on `E:`.
 ## Git Status
 
 Branch `main`, tracking `origin/main`, working tree clean. Local and remote heads
-verified identical at the end of Phase 1.
+verified identical at the end of Phase 2.
 
 ```
+6e264a2  feat: al brooks signal adapter, deterministic signal identity, mapping tests
+8e4431e  docs: record the phase 1 commit hash and push status in handoff
 dc336bd  feat: project foundation, domain layer, ports, config and test harness
 19e4888  docs: record phase 0 commit hash and push status in handoff
 68c8b87  docs: phase 0 architecture audit and integration contracts
@@ -640,14 +642,13 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-dc336bda4bfa3bf97f34b37675b1422fb2e40365
-feat: project foundation, domain layer, ports, config and test harness
+6e264a25f198cdf68a1d50db074906c9ea002751
+feat: al brooks signal adapter, deterministic signal identity, mapping tests
 ```
 
-**Push status: SUCCESS** — `19e4888..dc336bd  main -> main` on
+**Push status: SUCCESS** — `8e4431e..6e264a2  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
-
 ---
 
 ## Chronological History
@@ -730,14 +731,27 @@ afterwards and matches the local head exactly.
 1. Read `HANDOFF.md` — this file.
 2. `git status`
 3. `git log --oneline -n 10`
-4. Read `docs/architecture.md` §4 (the gap analysis) and §5 (the proposed
-   architecture). §9 lists the safety invariants that later phases must not relax.
-5. Read `docs/integration.md` §3 and §4 — the consolidated gaps and the
+4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
+   virtual environment is not set up. **245 tests should pass.** If they do not,
+   the repository is not in the state this file describes, and the repository
+   wins.
+5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
+   (the safety invariants — later phases must not relax them)**.
+6. Read `docs/signal-flow.md` for what currently works and where the path stops.
+7. Read `docs/integration.md` §3 and §4 — the consolidated gaps and the
    do-not-assume checklist.
-6. Verify the actual repository state against this file. **If they conflict, the
+8. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 1** from the Remaining Work list above.
+**Then start Phase 3** from the Remaining Work list above: `domain/stops.py`,
+`domain/take_profit.py` and `domain/validation.py`.
+
+**A note on what Phase 3 is and is not.** It is *policies over values already in
+hand* — resolving a stop, resolving a take profit, checking geometry. It is **not**
+position sizing: that needs the account balance and the symbol specification,
+which is Phase 4. The distinction matters because a sizer written without market
+data would have to invent it, and inventing account facts is exactly what this
+project refuses to do.
 
 **Standards for every phase, without exception:**
 
