@@ -56,8 +56,8 @@ either.
 |---|---|---|
 | 0 | Repository audit, architecture, integration contracts | ✅ complete |
 | 1 | Project foundation, packaging, configuration, test harness | ✅ complete |
-| 2 | Al Brooks signal adapter | ⬜ next |
-| 3 | Internal trading domain | ⬜ |
+| 2 | Al Brooks signal adapter | ✅ complete |
+| 3 | Internal trading domain — stop, take-profit and validation policies | ⬜ next |
 | 4 | Risk management and position sizing | ⬜ |
 | 5 | 1:1 risk/reward take-profit policy | ⬜ |
 | 6 | Trade validation pipeline | ⬜ |
@@ -69,8 +69,16 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**126 tests passing.** Lint, format, type check and the domain-isolation check
-all clean.
+**245 tests passing, 90% coverage.** Lint, format, type check and the
+domain-isolation check all clean. The suite runs **without the upstream projects
+installed** — which is what makes it a safety net rather than a souvenir.
+
+**What works today:** a signal is read from the price-action engine, normalised
+into the bridge's own representation, given a deterministic identity, and logged.
+**What does not:** everything after that. There is no risk calculation, no
+position size, no validation, no dry run and no execution. The bridge can
+currently *understand* a signal and say what it would need in order to trade it.
+It cannot trade it.
 
 ---
 
@@ -101,6 +109,7 @@ Full instructions, including Linux and macOS, are in
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | The design, and why each decision was made |
 | [docs/integration.md](docs/integration.md) | The exact upstream APIs this bridge calls, quoted from source |
+| [docs/signal-flow.md](docs/signal-flow.md) | What happens to a signal, step by step, and where it can stop |
 | [docs/setup.md](docs/setup.md) | How to install and run it on a laptop |
 | [HANDOFF.md](HANDOFF.md) | Where the project stands, and how to continue it |
 
