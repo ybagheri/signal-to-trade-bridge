@@ -35,6 +35,7 @@ from signal_to_trade_bridge.domain.models import (
     ExecutionRequest,
     ExecutionResult,
     PositionSize,
+    RiskBudget,
     RiskParameters,
     Signal,
     StopLoss,
@@ -45,6 +46,8 @@ from signal_to_trade_bridge.domain.models import (
     utc_now,
 )
 from signal_to_trade_bridge.domain.resolution import Resolution, refused, resolved
+from signal_to_trade_bridge.domain.risk import check_currency_compatibility, resolve_risk_budget
+from signal_to_trade_bridge.domain.sizing import check_broker_constraints, resolve_position_size
 from signal_to_trade_bridge.domain.stops import (
     STRUCTURAL_STOP_BASES,
     is_protective,
@@ -88,6 +91,7 @@ __all__ = [
     "PositionSize",
     "RejectionReason",
     "Resolution",
+    "RiskBudget",
     "RiskParameters",
     "Signal",
     "SignalAction",
@@ -99,11 +103,15 @@ __all__ = [
     "TradeDecision",
     "TradeIntent",
     "TradingError",
+    "check_broker_constraints",
+    "check_currency_compatibility",
     "is_favourable",
     "is_protective",
     "is_structural_basis",
     "is_structural_target_basis",
     "refused",
+    "resolve_position_size",
+    "resolve_risk_budget",
     "resolve_stop",
     "resolve_take_profit",
     "resolved",
