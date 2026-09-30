@@ -44,8 +44,30 @@ from signal_to_trade_bridge.domain.models import (
     TradeIntent,
     utc_now,
 )
+from signal_to_trade_bridge.domain.resolution import Resolution, refused, resolved
+from signal_to_trade_bridge.domain.stops import (
+    STRUCTURAL_STOP_BASES,
+    is_protective,
+    is_structural_basis,
+    resolve_stop,
+)
+from signal_to_trade_bridge.domain.take_profit import (
+    STRUCTURAL_TARGET_BASES,
+    is_favourable,
+    is_structural_target_basis,
+    resolve_take_profit,
+    target_from_ratio,
+)
+from signal_to_trade_bridge.domain.validation import (
+    validate_against_spec,
+    validate_geometry,
+    validate_policy,
+    validate_signal,
+)
 
 __all__ = [
+    "STRUCTURAL_STOP_BASES",
+    "STRUCTURAL_TARGET_BASES",
     "AccountBalance",
     "AutoTradeBridgeError",
     "ConfigurationError",
@@ -65,6 +87,7 @@ __all__ = [
     "InvalidVolumeError",
     "PositionSize",
     "RejectionReason",
+    "Resolution",
     "RiskParameters",
     "Signal",
     "SignalAction",
@@ -76,5 +99,18 @@ __all__ = [
     "TradeDecision",
     "TradeIntent",
     "TradingError",
+    "is_favourable",
+    "is_protective",
+    "is_structural_basis",
+    "is_structural_target_basis",
+    "refused",
+    "resolve_stop",
+    "resolve_take_profit",
+    "resolved",
+    "target_from_ratio",
     "utc_now",
+    "validate_against_spec",
+    "validate_geometry",
+    "validate_policy",
+    "validate_signal",
 ]
