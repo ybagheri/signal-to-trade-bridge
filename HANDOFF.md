@@ -822,13 +822,19 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-2ea3c93d21f9598d814730bc75e16a27b4091419
-feat: stop, take-profit and validation policies in the domain layer
+d7f093d630716353ee8de2c18ad76bd5c28953db
+docs: correct stale sections in the handoff and sync both READMEs
 ```
 
-**Push status: SUCCESS** — `683fbda..2ea3c93  main -> main` on
+**Push status: SUCCESS** — `2ea3954..d7f093d  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
+
+> **This section is always one commit behind by construction.** It records the
+> commit that contained the previous phase's work; recording the hash of the
+> commit that records the hash is not possible. The authoritative head is
+> `git log --oneline -n 1`, and the `## Git Status` list above is the one to
+> trust for history.
 ```
 6e264a25f198cdf68a1d50db074906c9ea002751
 feat: al brooks signal adapter, deterministic signal identity, mapping tests
