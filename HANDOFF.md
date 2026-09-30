@@ -465,12 +465,11 @@ itself must work on a laptop where nothing lives on `E:`.
 
 ## Git Status
 
-Branch `main`, tracking `origin/main`. See **Latest Commit** below for the current
-head.
-
-Phase 0 commits, both pushed:
+Branch `main`, tracking `origin/main`, working tree clean. Local and remote heads
+verified identical at the end of Phase 1.
 
 ```
+dc336bd  feat: project foundation, domain layer, ports, config and test harness
 19e4888  docs: record phase 0 commit hash and push status in handoff
 68c8b87  docs: phase 0 architecture audit and integration contracts
 ```
@@ -479,9 +478,14 @@ Phase 0 commits, both pushed:
 
 ## Latest Commit
 
-Populated at the end of Phase 1. Push status recorded here after the push is
-confirmed, never assumed — a claimed push that did not happen is worse than no
-claim, because the next contributor will assume the work is safe upstream.
+```
+dc336bda4bfa3bf97f34b37675b1422fb2e40365
+feat: project foundation, domain layer, ports, config and test harness
+```
+
+**Push status: SUCCESS** — `19e4888..dc336bd  main -> main` on
+`git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
+afterwards and matches the local head exactly.
 
 ---
 
