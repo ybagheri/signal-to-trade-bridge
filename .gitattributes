@@ -1,0 +1,34 @@
+# Enforce LF in the repository and on checkout, on every platform.
+#
+# Both upstream projects do this. Without it, a Windows checkout rewrites every
+# file to CRLF and a Linux one rewrites them back, so the same commit produces
+# different bytes on different laptops and a diff review stops being meaningful.
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.example text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.mq5 text eol=lf
+*.mqh text eol=lf
