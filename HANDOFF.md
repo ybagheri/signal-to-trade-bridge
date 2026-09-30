@@ -1402,10 +1402,11 @@ except MT5 itself must work on a laptop where nothing lives on `D:`.
 
 ## Git Status
 
-Branch `main`, tracking `origin/main`. Working tree state at the time Phase 5
+Branch `main`, tracking `origin/main`. Working tree state at the time Phase 6
 was written: see the commit list below.
 
 ```
+4f931f3  feat: the decision pipeline -- the first thing that calls the others
 3f8d21e  feat: finish the reward:risk policy, and fix four ways it was not what it said
 7c9bb99  docs: record the phase 4 commit hash, push status, and what this machine could not verify
 f250a4f  feat: risk management and position sizing, and fix the tick value divisor
@@ -1426,11 +1427,11 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-3f8d21e5b52b4d76f1f30a9bd8000ff0acee2d5d
-feat: finish the reward:risk policy, and fix four ways it was not what it said
+4f931f386c48a9125daa7d5ceebf2323cac04a7d
+feat: the decision pipeline -- the first thing that calls the others
 ```
 
-**Push status: SUCCESS** — `7c9bb99..3f8d21e  main -> main` on
+**Push status: SUCCESS** — `27bad30..4f931f3  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
 
@@ -1443,19 +1444,22 @@ afterwards and matches the local head exactly.
 ### What could not be verified on this machine
 
 Recorded rather than glossed over, because the alternative is a handoff that
-claims more than anyone checked. Unchanged from Phase 4 — neither phase touched an
-adapter, and neither could collect the integration tests:
+claims more than anyone checked. Unchanged through Phases 4, 5 and 6 — none of
+them touched an adapter:
 
-* **`pytest tests/integration` has not run in two phases.** The nine tests against
-  the real `Analyzer` collect only when `albrooks` is installed, and it is not
-  installed here. Phase 3 verified them green. Phases 4 and 5 touch no adapter
+* **`pytest tests/integration` has not run in three phases.** The nine tests
+  against the real `Analyzer` collect only when `albrooks` is installed, and it is
+  not installed here. Phase 3 verified them green. Phases 4–6 touch no adapter
   code, so they are *expected* to be unchanged — and they have **not** been run.
-  Run `pytest tests/integration -v` on a machine with the upstream checkout.
 * **The MT5 terminal build is unknown.** Alpari MT5 `_4`, and `auto-trade`'s
   control ids were measured on build 6184. Nothing was clicked and no terminal was
-  opened, so nothing is broken — Known Issue 5 is unresolved and Phase 11 owns it.
+  opened — Known Issue 5 is unresolved and Phase 11 owns it.
 * **No upstream checkouts exist here**, so `scripts/setup.ps1` has not been run on
   this machine either.
+
+**Phase 7 is the first phase that cannot be finished here at all**, because it
+needs the `MetaTrader5` bindings and the `auto-trade` checkout. Both are on the
+developer's other machine.
 
 ---
 
