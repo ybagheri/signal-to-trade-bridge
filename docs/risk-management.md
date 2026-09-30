@@ -122,8 +122,8 @@ once. The resolution is a **policy**, chosen per deployment:
 
 | `BRIDGE_TAKE_PROFIT_SOURCE` | Behaviour |
 |---|---|
-| `RR_FALLBACK` *(default)* | Use the signal's target when structurally defensible and on the correct side. Otherwise apply the ratio, and record that it was a fallback. |
-| `SIGNAL` | Use the signal's target. Refuse the trade if it is unusable. |
+| `RR_FALLBACK` *(default)* | Use the signal's target when it is structurally defensible, above the configured minimum ratio, and on the correct side. Otherwise apply the ratio, and record that it was a fallback. |
+| `SIGNAL` | Use the signal's target. Refuse the trade if it is unusable on any of those grounds. |
 | `RR_DERIVED` | Ignore signal targets entirely. Always the ratio. |
 | `NONE` | No take profit. Only valid if exits are managed elsewhere. |
 
@@ -137,16 +137,49 @@ The first and the last encode genuinely different intentions:
 A trader who has read the engine's own caveats may well want the second. It is not
 the same preference as the default, which is why it is a separate setting.
 
+### The "floor" was not real until Phase 5
+
+The paragraph above describes `RR_FALLBACK` as wanting *"1:1 as the floor"*, and
+until Phase 5 nothing compared the signal's implied ratio against anything. The
+configured ratio decided only the **fallback** distance; a structurally sound
+target at 0.2:1 was accepted silently under the default policy. The resolver's
+own docstring said so more precisely — *"use the target when structurally
+defensible"* — and nothing compared ratios. Two descriptions, one implementation.
+
+Phase 5 added `BRIDGE_MINIMUM_REWARD_RISK_RATIO`:
+
+| Setting | Effect |
+|---|---|
+| unset *(default)* | Any structurally sound target is taken as the engine measured it. **Unchanged behaviour.** |
+| set, e.g. `1.0` | A target implying less than 1:1 is treated as unusable, so the configured ratio is applied and the substitution recorded as a fallback. |
+
+**Off by default on purpose.** Switching it on starts replacing engine-measured
+targets with the configured distance — a trading decision, not a bridge upgrade,
+and one nobody should have made for them by editing a config file's meaning. The
+maintainer chose the opt-in form explicitly over both alternatives: making the
+configured ratio an implicit floor (silently changes the default policy), and
+refusing sub-floor targets instead of falling back (turns `RR_FALLBACK` into a
+filter).
+
+The floor applies where the signal's target is a **candidate** — `RR_FALLBACK`
+and `SIGNAL`. Under `RR_DERIVED` there is nothing to filter, because ignoring
+signal targets is the entire point of that policy; a test pins this so the
+interaction is deliberate.
+
 ### A fallback is never silent
 
 Under `RR_FALLBACK`, when the signal's target is unusable, the resolution records
-`fallback_because` with the specific reason. Every resolved target carries a
-`TakeProfitSource`, so a log can never make a 1:1 target look like the engine's
-own measured move. **That distinction is the difference between an auditable
-decision and a plausible-looking number.**
+`fallback_because` with the specific reason — including the ratio that was found
+and the floor it failed. Every resolved target carries a `TakeProfitSource`, so a
+log can never make a 1:1 target look like the engine's own measured move.
+**That distinction is the difference between an auditable decision and a
+plausible-looking number.**
 
 The signal's target is treated as unusable when it is absent, on the wrong side
-for the direction, or carries a non-structural basis.
+for the direction, carries a non-structural basis, or implies a ratio below the
+configured floor. They are checked in that order, so a target that is wrong on
+two grounds reports the one with the upstream remedy: a volatility-multiple basis
+is the engine's own defect, a poor ratio is this bridge's opinion about it.
 
 ### The achieved ratio is reported, not the configured one
 
@@ -154,6 +187,29 @@ for the direction, or carries a non-structural basis.
 configured one. The resolution reports `achieved_ratio` — what the trade actually
 has. A decision log reporting the configured ratio would be reporting an
 intention as a fact.
+
+**Every successful resolution reports it**, including the ratio the fallback
+produced, the ratio `RR_DERIVED` derived, and the ratio the strict `SIGNAL`
+policy accepted. Under `NONE` the key is present and **`None`**, because there is
+no target and therefore no ratio — which is a successful, deliberate outcome, not
+a refusal. Phase 5 fixed that: the key used to be *absent* on that path, so the
+first consumer to index it would have raised `KeyError` on a resolution that had
+already succeeded.
+
+**One ratio, one representation.** `Decimal` carries its own exponent, so the
+same ratio could be written as `"1"` or `"1.0"` depending on which arithmetic
+produced it — and a log query for one missed the other. `domain.canonical_ratio`
+normalises it, with a guard so a 100:1 configuration does not become `1E+2`. It
+changes only the representation; the numeric value is untouched, so nothing doing
+arithmetic on it is affected.
+
+### The engine's own ratio is not used
+
+The upstream engine computes a `reward_to_risk` and *ranks candidates on it*, and
+the adapter discards it. That is deliberate, and recorded in
+`docs/architecture.md §5.5` and `docs/integration.md §1.6`: the engine documents
+its own targets as unvalidated, and the bridge computes the same ratio from
+distances it has already validated. The cost is one line of diagnostic detail.
 
 ---
 
@@ -493,3 +549,11 @@ Established in Phases 3 and 4:
     inversely proportional to it and the under-sized position is the safe failure.
 13. **A size cannot be produced without both an account balance and a symbol
     specification**, and neither is ever defaulted.
+14. **The configured reward:risk ratio is not a floor on a signal's target**, and
+    a floor that *is* configured is opt-in, never silent, and applies only where
+    the signal's target is a candidate.
+15. **Every successful take-profit resolution reports `achieved_ratio`**, and it
+    is `None` only when there is no target at all. The key is never absent.
+16. **A configured zero is refused, never defaulted.** `Decimal("0")` is falsy, so
+    the `or default` idiom would have brought the bridge up at 0.5% and 1:1 after
+    the operator asked for neither.

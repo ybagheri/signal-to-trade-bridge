@@ -13,21 +13,21 @@ this way, this one says what happens, in order, and what each step refuses.
 ```
 Market data
     ↓
-[1] Al Brooks engine                 albrooks.Analyzer.analyze(...)
+[1] Al Brooks engine                 albrooks.Analyzer.analyze(...)     Phase 0
     ↓  AnalysisResult.decision  (a dict, 3 or 13 keys)
 [2] Signal adapter                   → internal Signal      ← IMPLEMENTED, Phase 2
     ↓
-[3] Signal validation                                          Phase 6
+[3] Signal validation                                           IMPLEMENTED, Phase 3
     ↓
-[4] Stop resolution                                           Phase 4
+[4] Stop resolution                                            IMPLEMENTED, Phase 3
     ↓
-[5] Take-profit resolution                                      Phase 5
+[5] Take-profit resolution                                       IMPLEMENTED, Phase 3, 5
     ↓
-[6] Account + symbol data                                      Phase 4, 7
+[6] Account + symbol data                             IMPLEMENTED via fakes, Phase 4
+    ↓                                                              real: Phase 7
+[7] Risk amount + position size                                     IMPLEMENTED, Phase 4
     ↓
-[7] Risk amount + position size                                Phase 4
-    ↓
-[8] Broker constraints                                         Phase 4
+[8] Broker constraints                                          IMPLEMENTED, Phase 4
     ↓
 [9] Idempotency                                                 Phase 9
     ↓
@@ -38,8 +38,18 @@ Market data
 MetaTrader 5 → broker
 ```
 
-Steps 1 and 2 exist. Steps 3 onward do not, and a signal arriving today goes
-nowhere. That is the honest state of the project.
+**Every stage from 2 to 8 is implemented and tested. Nothing connects them.**
+There is still no `ProcessSignal`, so a signal arriving today goes nowhere — the
+functions exist, are individually correct, and have never been called in sequence.
+
+That gap is Phase 6, and it is the first thing in this document that is *not* a
+Phase 0 finding: everything above it was discovered by auditing the two upstream
+repositories, and this was discovered by noticing that no line of `src/` mentions
+`resolve_stop` and `resolve_take_profit` together.
+
+Note also that step 6 is the only one whose *production* source is missing. In
+tests the account and symbol facts come from `adapters/fake/`, which is real code
+satisfying the real ports — not a stub that returns a tuple.
 
 ---
 

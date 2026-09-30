@@ -59,7 +59,7 @@ either.
 | 2 | Al Brooks signal adapter | ✅ complete |
 | 3 | Stop, take-profit and validation policies | ✅ complete |
 | 4 | Risk management and position sizing | ✅ complete |
-| 5 | 1:1 risk/reward take-profit policy | ⬜ largely built in Phase 3 |
+| 5 | 1:1 risk/reward take-profit policy | ✅ complete |
 | 6 | Trade validation pipeline | ⬜ next |
 | 7 | auto-trade execution adapter and MT5 account/symbol adapter | ⬜ |
 | 8 | Dry run / simulation mode | ⬜ |
@@ -69,7 +69,7 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**554 tests passing, 95% coverage.** Lint, format, type check and the
+**614 tests passing, 96% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 installed** — which is what makes it a safety net rather than a souvenir.
 
@@ -78,11 +78,13 @@ given a deterministic identity, validated, given a stop and a take profit under 
 explicit policy, and then **sized**: the risk budget from the account balance and
 the configured percentage, and the volume from the symbol's tick value and the
 broker's volume constraints — tick-value based, so it is correct for gold, indices
-and CFDs without a special case.
+and CFDs without a special case. Every trade that gets through reports the
+reward:risk it *actually* has, not the one that was configured.
+
 **What does not:** nothing connects a sized trade to an order. The signal-to-size
 pipeline is Phase 6, and the account and symbol facts come from fakes until the
-MT5 data adapter of Phase 7 exists. A volume below the broker's minimum is
-refused rather than floored up — always.
+MT5 data adapter of Phase 7 exists. A volume below the broker's minimum is refused
+rather than floored up — always.
 
 ---
 

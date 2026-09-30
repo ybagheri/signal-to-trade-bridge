@@ -112,6 +112,28 @@ def _require_int(name: str, default: int) -> int:
     return value
 
 
+def _require_decimal(name: str, default: str) -> Decimal:
+    """A decimal setting where ``0`` is a mistake rather than a value.
+
+    The same argument as :func:`_require_int`, applied to the two settings where
+    getting it wrong costs money. ``Decimal("0")`` is falsy, so
+    ``_decimal(...) or Decimal("0.5")`` silently replaces a configured
+    ``BRIDGE_RISK_PERCENT=0`` with the default -- and the bridge then trades at
+    0.5% because someone typed a zero they meant to be caught. The value
+    validation in :class:`RiskParameters` is the check that was supposed to see
+    it, and the ``or`` idiom hides it before it runs.
+
+    A *blank* value still means "not set" and takes the default, which is what
+    ``KEY=`` in a ``.env`` file has always meant here. The distinction is between
+    "the operator said nothing" and "the operator said zero", and only the second
+    one must reach validation.
+    """
+    value = _decimal(name, None)
+    if value is None:
+        return Decimal(default)
+    return value
+
+
 def _symbol_set(name: str) -> frozenset[str]:
     raw = os.getenv(name, "")
     return frozenset(item.strip().upper() for item in raw.split(",") if item.strip())
@@ -319,8 +341,12 @@ def config_from_env(*, env_file: Path | None = None, apply: bool = True) -> Brid
 
     try:
         risk = RiskParameters(
-            risk_percent=_decimal(f"{p}RISK_PERCENT", "0.5") or Decimal("0.5"),
-            reward_risk_ratio=_decimal(f"{p}REWARD_RISK_RATIO", "1.0") or Decimal("1.0"),
+            # `_require_decimal`, not `_decimal(...) or default`: `Decimal("0")` is
+            # falsy, so the `or` would swallow a configured zero and leave the
+            # bridge trading at 0.5% at 1:1 after the operator asked for neither.
+            risk_percent=_require_decimal(f"{p}RISK_PERCENT", "0.5"),
+            reward_risk_ratio=_require_decimal(f"{p}REWARD_RISK_RATIO", "1.0"),
+            minimum_reward_risk_ratio=_decimal(f"{p}MINIMUM_REWARD_RISK_RATIO", None),
             take_profit_source=take_profit_source,
             allow_volatility_fallback_stop=_flag(f"{p}ALLOW_VOLATILITY_FALLBACK_STOP", False),
             minimum_evidence_score=_float(f"{p}MINIMUM_EVIDENCE_SCORE", None),

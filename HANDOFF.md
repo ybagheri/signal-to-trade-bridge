@@ -12,21 +12,23 @@
 
 ## Current Status
 
-**Phases 0, 1, 2, 3 and 4 complete. Phase 5 not started.**
+**Phases 0, 1, 2, 3, 4 and 5 complete. Phase 6 not started.**
 
 Phase 0 audited the upstream repositories. Phase 1 built the foundation. Phase 2
 built the first adapter. Phase 3 gave the domain its **policies**: stop resolution,
 take-profit policy, and validation. Phase 4 added **risk management and position
-sizing** — the phase the whole project exists for.
+sizing**. Phase 5 finished the **reward:risk policy** — and found that the thing it
+was supposed to verify was, in the default configuration, not actually
+configured.
 
-**554 tests passing, 95% coverage.** The five files this phase added have **100%
-statement coverage**. Lint, format, type check and the domain-isolation check all
+**614 tests passing, 96% coverage.** Every file touched by this phase is at 100%
+statement coverage. Lint, format, type check and the domain-isolation check all
 clean. The suite still runs **without `albrooks` installed**.
 
 ```
-Last completed phase: 4
-Current phase:        5 (not started)
-Next phase:           5 — verify the 1:1 risk/reward wiring (largely built in Phase 3)
+Last completed phase: 5
+Current phase:        6 (not started)
+Next phase:           6 — ProcessSignal, the trade validation pipeline
 ```
 
 ---
@@ -38,7 +40,7 @@ Next phase:           5 — verify the 1:1 risk/reward wiring (largely built in 
 - [x] **Phase 2** — Al Brooks signal adapter
 - [x] **Phase 3** — Stop, take-profit and validation policies
 - [x] **Phase 4** — Risk management and position sizing
-- [ ] Phase 5 — 1:1 risk/reward
+- [x] **Phase 5** — 1:1 risk/reward
 - [ ] Phase 6 — Trade validation pipeline
 - [ ] Phase 7 — auto-trade adapter
 - [ ] Phase 8 — Dry run / simulation
@@ -47,6 +49,124 @@ Next phase:           5 — verify the 1:1 risk/reward wiring (largely built in 
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
+
+---
+
+## What Phase 5 Built
+
+```
+models.py           canonical_ratio()          one ratio, one representation
+                    achieved_ratio()           the single ratio implementation
+                    RiskParameters.minimum_reward_risk_ratio   the opt-in floor
+                    RiskBudget invariant       reward_amount must match amount*ratio
+                    TradeIntent.take_profit    now optional (NONE is supported)
+take_profit.py      signal_target_ratio()      the ratio a signal's target implies
+                    resolve_take_profit        delegates all ratio arithmetic
+configuration/      _require_decimal()         a configured 0 is no longer swallowed
+tests/unit/
+  test_reward_risk_ratio.py   44 tests, the floor, the reporting and the wiring
+```
+
+### The finding that made this phase worth doing
+
+Phase 4's handoff described Phase 5 as *"largely already implemented — verify the
+wiring and add the missing coverage, not build a second mechanism"*, and that was
+**wrong about the first half**. A full audit of the chain — env → config →
+`RiskParameters` → `resolve_take_profit` → `RiskBudget` → `TradeIntent` — found
+that under the **default** policy the configured 1:1 was not a floor at all.
+Nothing anywhere compared the signal's implied ratio against anything. A
+structurally sound engine target at **0.2:1** was accepted silently, and the only
+trace was an `achieved_ratio` field in a log nobody was reading.
+
+The resolver's own docstring said the precise thing — *"use the target when
+structurally defensible"* — and the interpretation paragraph two lines below said
+*"I want 1:1 as the floor"*. Two descriptions, one implementation, and nobody
+noticed for three phases because the code did exactly what its primary docstring
+said.
+
+**This was escalated to the maintainer rather than decided**, because the fix
+changes trading behaviour. Three options were put: make the configured ratio an
+implicit floor (silently changes the default policy), add an opt-in floor, or
+change nothing. **The opt-in floor was chosen** — a new
+`BRIDGE_MINIMUM_REWARD_RISK_RATIO`, default unset, meaning `RR_FALLBACK` behaves
+exactly as it did. Turning it on replaces engine-measured targets with the
+configured distance, which is a trading decision nobody should have made for
+them by upgrading a config file's meaning.
+
+**The unresolved half is not Phase 5's to close.** Whether the *default* should
+have a floor is still an open question, and it is recorded as one below rather
+than quietly resolved in either direction.
+
+### Bugs Phase 5 found
+
+Three, plus one dead guard removed. All fixed.
+
+1. **`config.py` swallowed a configured `0` for both money settings.**
+   `risk_percent=_decimal(...) or Decimal("0.5")` and the same for
+   `reward_risk_ratio`. `Decimal("0")` is falsy, so `BRIDGE_RISK_PERCENT=0`
+   started the bridge at **0.5%** and `BRIDGE_REWARD_RISK_RATIO=0` at **1:1**,
+   after the operator had asked for neither. Phase 1 had already identified this
+   exact idiom as a bug and fixed it for `BAR_COUNT` (`_require_int`), and left
+   it in the two fields where it costs money. Now `_require_decimal`.
+2. **`achieved_ratio` was absent under `TakeProfitSource.NONE`.** The key simply
+   did not exist on that path, so `details["achieved_ratio"]` raised `KeyError`
+   on a resolution that had **already succeeded** — the worst moment for a
+   missing key, because the surrounding code has decided the trade is fine. Now
+   present and `None`, which says "there is no target" rather than "0:1".
+3. **`TradeIntent` could not represent `NONE` at all.** `take_profit` was
+   mandatory while the take-profit resolver correctly returns `None` for that
+   policy, and `to_dict()` evaluated `reward_to_risk` unconditionally. A
+   supported, documented, tested configuration made the decision object
+   **unconstructible**. Whoever wrote Phase 6 would have hit this and plausibly
+   resolved it by refusing trades an operator had deliberately enabled — a silent
+   policy change wearing the costume of a type error.
+4. **The same ratio was computed in five places.** Four inline
+   `distance / stop.distance` divisions in `resolve_take_profit`, plus
+   `TradeIntent.reward_to_risk`. Now one `achieved_ratio()` in `models.py`, with
+   an AST test asserting the resolver contains **no division at all** — the
+   enforcement being that a fifth copy cannot quietly appear.
+
+Also: **`_MIN_RATIO` was deleted.** A module constant in `take_profit.py` whose
+docstring explained that a "minimum-ratio clamp" protected the target
+computation — and which nothing referenced. A guard that cannot fire is worse
+than no guard: it reads as though it handles a case it does not, and a
+maintainer trusting that docstring would believe a clamp existed.
+
+### A reporting inconsistency worth naming
+
+The same ratio was written to the log as `"1"` or `"1.0"` depending on which
+arithmetic produced it, because `Decimal` carries its own exponent. A log query
+for one missed the other. `canonical_ratio()` normalises it — **with a guard**,
+because `Decimal("100").normalize()` is `1E+2` and a 100:1 configuration would
+have been logged in exponent notation. Only the representation changes; the
+numeric value is untouched.
+
+### Design decisions Phase 5 made
+
+- **The floor is opt-in, and off by default.** See above. It filters the signal's
+  target only — under `RR_DERIVED` there is nothing to filter, which is what that
+  policy is for, and a test pins the interaction so it is deliberate.
+- **Under `SIGNAL` a below-floor target refuses the trade**, rather than being
+  replaced by the ratio. There is no fallback under the strict policy, and
+  silently substituting a different exit plan for the one the trader demanded
+  would be the worst version of the feature. The asymmetry between the two
+  policies is intentional and tested.
+- **The floor is checked *last*,** after presence, side and basis. A target wrong
+  on two grounds reports the one with the upstream remedy: a volatility-multiple
+  basis is the engine's own defect; a poor ratio is this bridge's opinion about
+  it.
+- **`reward_amount` is now an enforced invariant of `RiskBudget`,** not a field
+  that happens to be derived. Nothing consumed it, so an inconsistent pair would
+  have passed every test while the decision log advertised a planned gain the
+  bridge never aimed for. Compared numerically, not as text — `50` and `50.00`
+  are the same money, and `amount * ratio` preserves whatever exponent the
+  operands had.
+- **The upstream engine's `reward_to_risk` is deliberately discarded**, and this
+  is now documented rather than merely true. The engine ranks candidates partly
+  on it, so a decision record cannot say *why* the engine chose a candidate. The
+  engine documents its own targets as unvalidated, and the bridge computes the
+  same ratio from distances it has already validated. The cost is one line of
+  diagnostic detail; the benefit is provenance.
 
 ---
 
@@ -615,9 +735,23 @@ Decisions made in Phase 4 — the ones a later phase is most likely to re-invert
   money" and "we could not ask" are different answers, and collapsing them is how a
   system ends up sizing trades against a stale balance.
 
----
+Decisions made in Phase 5 — the ones most likely to be re-litigated:
 
-## Important Decisions
+- **The floor is opt-in and off by default.** See Q6. The tempting "simplification"
+  is to make `reward_risk_ratio` do double duty, and it would silently change what
+  the default policy does to an existing deployment.
+- **Under `SIGNAL` a below-floor target refuses; under `RR_FALLBACK` it falls
+  back.** The asymmetry is the point of having two policies, and substituting a
+  computed exit for the one the strict policy demanded would be the worst version
+  of the feature.
+- **The floor is checked last**, after presence, side and basis, so a target wrong
+  on two grounds reports the one whose remedy is upstream.
+- **A ratio is normalised, never rounded.** Rounding a ratio for readability is
+  how 0.9:1 becomes 1:1 in a log.
+- **A dead guard is removed, not kept with a reassuring comment.** `_MIN_RATIO` had
+  a docstring describing a clamp that did not exist.
+
+---
 
 Recorded with their reasons, because these are the ones a future phase is most
 likely to re-litigate by accident.
@@ -646,6 +780,13 @@ likely to re-litigate by accident.
 | Policy vocabularies live in the domain, not the adapter | Deciding what counts as a defensible stop is a trading policy, and a policy in an adapter changes whenever someone edits a mapping. |
 | Geometry duplicates the stop-side check | Different callers, and geometry can come from configuration. A redundant check costs a comparison; a missing one costs a rejected broker order. |
 | Fakes come in Phase 4, before the real MT5 adapter | Unblocks the sizer's tests immediately, and lets the real adapter be written in Phase 7 against tests that already pin the contract. |
+| The reward:risk floor is **opt-in**, not the configured ratio | Turning it on replaces engine-measured targets with a computed distance. That is a trading decision, and the maintainer chose not to have an upgrade make it silently. See Q6. |
+| One implementation of the ratio, enforced by AST | Five copies is five places for one to be edited and the rest to be quietly wrong, and a policy that checks one ratio while a log reports another is the exact disagreement this project refuses. |
+| `achieved_ratio` is present on every success path, `None` under `NONE` | A key that is *absent* on a successful resolution raises `KeyError` in code that has already decided the trade is fine. `None` says "no target" without claiming 0:1. |
+| `TradeIntent.take_profit` is optional | `TakeProfitSource.NONE` is supported, documented and tested, and a model that cannot represent it is a bug waiting to be misdiagnosed as a policy change. |
+| `reward_amount` is an enforced invariant of `RiskBudget` | Nothing consumed it, so an inconsistent pair would have passed every test while the log advertised a gain the bridge never aimed for. |
+| The upstream engine's `reward_to_risk` is discarded, and that is documented | The engine documents its own targets as unvalidated, and the bridge recomputes the ratio from validated distances. The cost is one line of diagnostic detail; recorded so it is not read as an oversight. |
+| A configured `0` is refused, never defaulted | `Decimal("0")` is falsy, so `or default` brought the bridge up at 0.5% and 1:1 after the operator asked for neither. Phase 1 had already fixed this idiom for `BAR_COUNT`. |
 
 ---
 
@@ -716,6 +857,29 @@ What exists and works:
   under-sized every position on an instrument whose two tick values differ. See
   *The bug Phase 4 found* above.
 
+**Phase 5 — the reward:risk policy, finished**
+
+- **`BRIDGE_MINIMUM_REWARD_RISK_RATIO`**, an opt-in floor on the ratio a signal's
+  own target must clear to be used. Unset by default, so `RR_FALLBACK` behaves
+  exactly as it did; set it equal to the configured ratio to get the behaviour the
+  policy has always described. Under the strict `SIGNAL` policy a below-floor target
+  refuses rather than being replaced.
+- **`achieved_ratio` on every successful resolution**, including the path where it
+  used to be missing entirely, and `None` — rather than absent or `0.0` — when
+  there is no target at all.
+- **One implementation of the ratio**, in `models.achieved_ratio`, with an AST test
+  forbidding the resolver from dividing on its own.
+- **`canonical_ratio`**, because `Decimal` carries its own exponent and the same
+  ratio was logged as both `"1"` and `"1.0"` depending on which arithmetic produced
+  it.
+- **`TradeIntent` can represent `TakeProfitSource.NONE`**, which it could not
+  before.
+- **`RiskBudget.reward_amount` is an enforced invariant** rather than a derived
+  field nothing checked.
+- **A configured `0` is refused, never defaulted**, for the two settings where
+  silently defaulting would change what the bridge trades.
+- **614 tests, 96% coverage**; every file touched at 100%.
+
 **Documentation**: architecture, integration contracts, setup, signal flow, risk
 management, bilingual README.
 
@@ -725,7 +889,8 @@ through sizing it works. Two things are missing, and they are different in kind:
 - **Nothing connects a signal to a size.** `RiskService` takes a symbol, a stop
   and a risk configuration; it does not know what a `Signal` is. That
   composition — `ProcessSignal` — is Phase 6. Until then the pipeline can size a
-  trade it has not been asked to size.
+  trade it has not been asked to size, and no code in `src/` has ever called
+  `resolve_stop`, `resolve_take_profit` or `validate_geometry` in sequence.
 - **The account and symbol facts come from fakes.** In production they have to
   come from MetaTrader 5, which is Phase 7. Until then the numbers are real
   arithmetic over invented facts, which is exactly the situation the AST tests
@@ -733,7 +898,7 @@ through sizing it works. Two things are missing, and they are different in kind:
 
 Margin checking is also absent, and is recorded as a known gap rather than an
 oversight: a position can pass every check in this project and still be refused by
-the broker for margin.
+the broker for insufficient margin.
 
 The honest summary: the bridge can **understand** a signal, **validate** it,
 **size** it, and say exactly what it would need in order to place it. It cannot
@@ -748,12 +913,13 @@ yet place one.
 
 | File | Tests | Covers |
 |---|---|---|
-| `unit/test_domain_models.py` | 75 | Every value object, its validation, and its invariants. |
+| `unit/test_domain_models.py` | 91 | Every value object, its validation, and its invariants. |
 | `unit/test_stop_resolution.py` | 56 | The no-invented-stop rule, the basis policy, and every refusal path. |
 | `unit/test_take_profit_policy.py` | 50 | The four policies, the ratio arithmetic, and provenance. |
 | `unit/test_albrooks_mapper.py` | 49 | The mapping, against stubs shaped like the real engine's output. |
 | `unit/test_validation.py` | 48 | The four validation layers, fail-closed behaviour. |
 | `unit/test_position_sizing.py` | 46 | The sizer, the three floor-up guards, and the conservative tick value. |
+| `unit/test_reward_risk_ratio.py` | 44 | The opt-in floor, the achieved-ratio reporting, one ratio implementation. |
 | `unit/test_risk_service.py` | 35 | The wiring, the two reserved events, and the fakes as port implementations. |
 | `unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
 | `unit/test_risk_budget.py` | 31 | The no-invented-balance rule, the refusals, and currency coherence. |
@@ -765,27 +931,27 @@ yet place one.
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **555 collected, 554 passed, 2 skipped** | |
+| **Total** | **614 collected, 612 passed, 2 skipped** | |
 
-> **The per-file counts in this table were wrong before this phase and are now
+> **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
 > mapper and 7 in the isolation test; the real figures are 49 and 13. The totals
 > it reported were close to right for the wrong reasons. Nothing about the code
 > was affected — only the record of it, which is the thing this file is for.
 
-Coverage: **95%** of statements. The five files Phase 4 added — `risk.py`,
-`sizing.py`, `application/risk_service.py`, `adapters/fake/account.py`,
-`adapters/fake/symbols.py` — are at **100%**, as are the four Phase 3 files.
-`ports/` shows 0% line coverage, which is expected for `Protocol` declarations and
-says nothing; `unit/test_ports.py` checks their contract instead.
+Coverage: **96%** of statements. The Phase 5 files — `test_reward_risk_ratio.py`
+and every line of `models.py`, `take_profit.py` and `config.py` this phase
+touched — are at **100%**, as are the five files Phase 4 added and the four Phase 3
+added. `ports/` shows 0% line coverage, which is expected for `Protocol`
+declarations and says nothing; `unit/test_ports.py` checks their contract instead.
 
 The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   63 files already formatted
+ruff format --check .   64 files already formatted
 mypy                    Success: no issues found in 32 source files
-pytest                  554 passed, 2 skipped
+pytest                  612 passed, 2 skipped
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -804,7 +970,7 @@ so the ignore is already there when the import arrives.
 live tests, and it applies here. Run `pytest tests/integration -v` explicitly
 before trusting an adapter change.
 
-### Three tests worth knowing about
+### Four tests worth knowing about
 
 `test_there_is_no_fallback_that_produces_a_stop` walks `stops.py`'s own AST and
 asserts that no numeric literal in it could serve as a price and that every
@@ -813,15 +979,24 @@ asserts that no numeric literal in it could serve as a price and that every
 `test_there_is_no_fallback_that_produces_a_balance` and
 `test_there_is_no_fallback_that_produces_a_tick_value` are the same idea for
 `risk.py` and `sizing.py`. The balance one additionally asserts that `risk.py`
-never constructs an `AccountBalance` and that the budget's amount comes from
-`RiskParameters.risk_amount` rather than a second implementation of the
-percentage calculation.
+never constructs an `AccountBalance`, and that both the budget's amount and its
+planned gain come from `RiskParameters` rather than from a second implementation
+of either calculation.
 
 All three are the enforcement behind one rule stated three times: **nothing in
 this project invents a stop, a balance or a tick value.** The architectural test
 covers imports; these cover the *absence of behaviour*, which is the thing a
 reviewer has to be told about and the thing no import rule would catch. Read them
 before adding anything to `stops.py`, `risk.py` or `sizing.py`.
+
+`test_resolve_take_profit_never_divides` walks the take-profit resolver's AST and
+asserts it performs **no division of its own**. Phase 5 removed four inline
+`distance / stop.distance` copies that had accumulated alongside a fifth in
+`TradeIntent`. The rule is that the ratio has exactly three named entry points —
+`signal_target_ratio` for a target the resolver has not yet accepted,
+`achieved_ratio` for one it has, and `target_from_ratio` for deriving a price from
+a configured ratio — and the test is how "exactly three" stays true. It is the
+fourth test to read before touching ratio arithmetic anywhere.
 
 `test_a_missing_evidence_score_is_refused_not_allowed_through` pins the
 fail-closed direction of the evidence filter. A missing value counting as a pass
@@ -883,27 +1058,19 @@ to fix without the maintainer's agreement.
 
 As laid out in `README.md`.
 
-#### Phase 5 — 1:1 risk/reward  ← next, and the smallest remaining phase
+#### Phase 5 — 1:1 risk/reward  ← **done, and it was not a no-op**
 
-**Largely already implemented.** The take-profit policy in Phase 3 applies the
-configured ratio, and `TradeIntent.reward_to_risk` reports the *achieved* ratio
-computed from the distances actually used rather than the configured one. Phase 5
-should therefore verify the wiring and add the missing coverage, **not build a
-second mechanism**. The useful work is:
+The handoff for this phase said the work was "largely already implemented — verify
+the wiring and add the missing coverage". The wiring turned out to be *present but
+not connected*, and the default policy did not do what its own documentation said.
+See *The finding that made this phase worth doing* above.
 
-* end-to-end coverage of the three stages that touch the ratio together — stop
-  resolution, take-profit resolution, and now sizing — which needs `ProcessSignal`
-  and is therefore really Phase 6 work;
-* confirming `BRIDGE_REWARD_RISK_RATIO` flows through configuration into
-  `RiskBudget.reward_amount`, which Phase 4 now produces but nothing yet asserts;
-* the case where the configured ratio cannot be met because the signal's own
-  target is closer — already handled by `RR_FALLBACK` and reported as
-  `achieved_ratio`, and worth a test that says so.
+**Do not read this entry as confirmation that a phase can be skipped because its
+output looks finished.** Three of the four bugs fixed in this phase were in code
+that Phases 1 and 3 wrote, had 200+ passing tests, and was described here as
+complete.
 
-If Phase 5 turns out to have nothing left to do, **say so in this file rather than
-manufacturing work**, and move to Phase 6.
-
-#### Phase 6 — trade validation pipeline
+### Phase 6 — trade validation pipeline  ← next
 
 `ProcessSignal`, the single use case. This is where the phases compose:
 
@@ -913,9 +1080,26 @@ signal → validate_signal → resolve_stop → resolve_take_profit → validate
        → TradeIntent → TradeDecision
 ```
 
-It is also where `STOP_RESOLVED`, `TAKE_PROFIT_RESOLVED` and `TRADE_VALIDATED`
-finally get emitted — Phase 4 established that the domain has no logger, so the
-two Phase 3 events are still un-emitted and this is the fix.
+**This is the phase the project has been deferring.** Every stage above exists and
+is tested; nothing in `src/` has ever called most of them in sequence, which is why
+the audit could find the ratio wiring intact only as far as `BridgeConfig` and no
+further.
+
+Also Phase 6's, and it is why the boundary is here rather than later:
+
+- **`STOP_RESOLVED`, `TAKE_PROFIT_RESOLVED` and `TRADE_VALIDATED` finally get
+  emitted.** Phase 4 established that the domain has no logger and must not
+  acquire one, so the two Phase 3 events are still un-emitted after two phases.
+  `ProcessSignal` is the first layer that may hold one.
+- **`TradeIntent` becomes constructible in anger,** including with
+  `take_profit=None` for the `NONE` policy — the case Phase 5 fixed the model for.
+- **`validate_policy`'s `max_open_positions`** gets a real value to check against,
+  since `AccountBalance.open_positions` exists and nothing has ever passed it.
+
+Two things Phase 6 should **not** do, both of which a reader might reasonably
+assume: it should not build a second sizing or ratio mechanism (Phase 5 removed
+the duplication; do not reintroduce it), and it should not open a terminal or call
+an executor. Dry run and execution are Phase 8 and Phase 7.
 
 #### Phase 7 — adapters
 
@@ -985,6 +1169,33 @@ than a message.
 should not — the execution project owns execution, and the brief is explicit. Noted
 only so nobody later "simplifies" it away. The bridge's *data* adapter uses the
 bindings; its *execution* path does not.
+
+**Q6. Whether `RR_FALLBACK` should have a floor by default.** **Raised in Phase 5,
+decided for now, still open.**
+
+The default policy documents itself as "I want 1:1 as the floor" and does not
+implement one: nothing compares the signal's implied ratio against anything, so a
+structurally sound 0.2:1 target is accepted silently. Phase 5 made the floor
+*possible* — `BRIDGE_MINIMUM_REWARD_RISK_RATIO`, unset by default, so behaviour is
+unchanged — because the choice between the alternatives changes what trades the
+bridge takes and is the maintainer's to make.
+
+The maintainer chose **opt-in** over the two other options on the table:
+
+| Option | Rejected because |
+|---|---|
+| Make `reward_risk_ratio` an implicit floor | Silently changes what the default policy means for any existing deployment, and the change is invisible: a trade that used to take the engine's target now takes a computed one. |
+| Refuse a below-floor target under `RR_FALLBACK` | Turns a fallback policy into a filter. `RR_FALLBACK` would refuse trades that `SIGNAL` accepts, which is the opposite of what "fallback" means. |
+| **Add an opt-in floor** *(chosen)* | Nothing changes until someone asks for it, and the setting is documented as the way to get the behaviour the docs have always described. |
+
+**Still open, deliberately.** Whether the *default* should eventually carry a floor
+is a trading decision that no test can settle. If it is ever revisited, the argument
+to have is: the default says 1:1, a 0.2:1 trade contradicts what the operator asked
+for, and a floor is the only mechanism that makes the two agree. The argument
+against: the upstream engine ranks candidates on its own ratio, so a floor silently
+overrides an engine that already thought about it — and the trader chose the engine.
+Recorded rather than resolved, and it should not be resolved without the maintainer
+saying so.
 
 ---
 
@@ -1238,6 +1449,40 @@ claims more than anyone checked:
   the domain has no logger and must not acquire one, so the two Phase 3 events
   wait for Phase 6's `ProcessSignal`, which is the first place that can emit them.
 
+- **Phase 5** — finished the reward:risk policy, and found it was not finished. A
+  full audit of the chain from `BRIDGE_REWARD_RISK_RATIO` through configuration,
+  `RiskParameters`, `resolve_take_profit`, `RiskBudget` and `TradeIntent` found
+  that under the **default** policy the configured 1:1 was not a floor: nothing
+  compared the signal's implied ratio against anything, so a structurally sound
+  target at 0.2:1 was accepted silently. Added `BRIDGE_MINIMUM_REWARD_RISK_RATIO`
+  as an **opt-in** floor (unset by default, so behaviour is unchanged), plus
+  `achieved_ratio`, `canonical_ratio` and `signal_target_ratio`. 614 tests, 96%
+  coverage, every file touched at 100%.
+
+  The floor was escalated to the maintainer rather than decided here, because it
+  changes which trades the bridge takes. Three options went on the table and
+  **opt-in** was chosen; see Q6, which also records why the other two were
+  rejected and why the question is left open rather than quietly settled.
+
+  Four bugs found and fixed, three of them in code Phases 1 and 3 had written and
+  called complete:
+  - `config.py` used `risk_percent=_decimal(...) or Decimal("0.5")` and the same
+    for the reward ratio. `Decimal("0")` is falsy, so `BRIDGE_RISK_PERCENT=0`
+    started the bridge at **0.5%** and `BRIDGE_REWARD_RISK_RATIO=0` at **1:1**.
+    Phase 1 had already identified this idiom as a bug and fixed it for
+    `BAR_COUNT`; it was left in the two fields where it costs money.
+  - `achieved_ratio` did not exist on the `TakeProfitSource.NONE` path, so indexing
+    it raised `KeyError` on a resolution that had already succeeded.
+  - `TradeIntent` required a `take_profit`, so a supported, documented, tested
+    policy made the class unconstructible — and `to_dict()` divided by a take
+    profit it assumed was there.
+  - The ratio was computed in five places. Now one `achieved_ratio()`, with an AST
+    test asserting `resolve_take_profit` performs no division of its own.
+
+  Also removed: `_MIN_RATIO`, a constant whose docstring described a minimum-ratio
+  clamp that did not exist and which nothing referenced. A dead guard is worse
+  than no guard, because it reads as though it handles a case it does not.
+
 ---
 
 ## How To Continue
@@ -1248,7 +1493,7 @@ claims more than anyone checked:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **554 tests should pass, 2 skipped.** If
+   virtual environment is not set up. **612 tests should pass, 2 skipped.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
@@ -1261,21 +1506,32 @@ claims more than anyone checked:
 9. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 5** from the Remaining Work list above — and read that section
-first, because Phase 5 is **largely already implemented** and may have nothing
-left to do. If that is what you find, say so here rather than manufacturing work,
-and move to Phase 6.
+**Then start Phase 6** from the Remaining Work list above: `ProcessSignal`, the
+single use case that composes every stage. Every stage exists and is tested;
+nothing has ever called them in sequence.
 
-**Before writing anything that touches money, read all three AST tests:**
+**A warning about this file's own claims, written after Phase 5.** Phases 4 and 5
+were each described here as "largely already implemented" or "verify the wiring
+and add the missing coverage". Both were wrong, and both hid real bugs in code with
+200+ passing tests — a tick-value divisor that under-sized positions, and a
+configuration idiom that silently swallowed a configured `0`. **Where this file
+says a phase's output looks finished, read the source before believing it.** A
+handoff that says "already done" is a claim to be checked, exactly like a claim
+about a path.
+
+**Before writing anything that touches money or ratios, read all four AST tests:**
 
 * [`tests/unit/test_stop_resolution.py::test_there_is_no_fallback_that_produces_a_stop`](tests/unit/test_stop_resolution.py)
 * [`tests/unit/test_risk_budget.py::test_there_is_no_fallback_that_produces_a_balance`](tests/unit/test_risk_budget.py)
 * [`tests/unit/test_position_sizing.py::test_there_is_no_fallback_that_produces_a_tick_value`](tests/unit/test_position_sizing.py)
+* [`tests/unit/test_reward_risk_ratio.py::test_resolve_take_profit_never_divides`](tests/unit/test_reward_risk_ratio.py)
 
-They are the enforcement behind one rule stated three times — *nothing in this
-project invents a stop, a balance or a tick value* — and they will fail if the
-corresponding module gains a numeric literal that could serve as one. A contributor
-adding anything to `stops.py`, `risk.py` or `sizing.py` should read these first.
+The first three enforce one rule stated three times — *nothing in this project
+invents a stop, a balance or a tick value* — and will fail if the corresponding
+module gains a numeric literal that could serve as one. The fourth enforces that
+the reward:risk ratio is computed in exactly one place, so a policy cannot check
+one ratio while a decision log reports another. A contributor touching `stops.py`,
+`risk.py`, `sizing.py` or any ratio arithmetic should read all four first.
 
 **Standards for every phase, without exception:**
 

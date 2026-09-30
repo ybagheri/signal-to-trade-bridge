@@ -43,6 +43,7 @@ from signal_to_trade_bridge.domain.models import (
     TakeProfit,
     TradeDecision,
     TradeIntent,
+    achieved_ratio,
     utc_now,
 )
 from signal_to_trade_bridge.domain.resolution import Resolution, refused, resolved
@@ -59,6 +60,7 @@ from signal_to_trade_bridge.domain.take_profit import (
     is_favourable,
     is_structural_target_basis,
     resolve_take_profit,
+    signal_target_ratio,
     target_from_ratio,
 )
 from signal_to_trade_bridge.domain.validation import (
@@ -103,6 +105,7 @@ __all__ = [
     "TradeDecision",
     "TradeIntent",
     "TradingError",
+    "achieved_ratio",
     "check_broker_constraints",
     "check_currency_compatibility",
     "is_favourable",
@@ -115,6 +118,7 @@ __all__ = [
     "resolve_stop",
     "resolve_take_profit",
     "resolved",
+    "signal_target_ratio",
     "target_from_ratio",
     "utc_now",
     "validate_against_spec",

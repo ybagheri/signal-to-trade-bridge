@@ -31,6 +31,7 @@ from signal_to_trade_bridge.domain.models import (
     TakeProfit,
     TradeDecision,
     TradeIntent,
+    canonical_ratio,
 )
 
 
@@ -400,6 +401,27 @@ class TestRiskBudget:
         with pytest.raises(ValueError, match="currency is required"):
             self._budget(currency=blank)
 
+    def test_the_planned_gain_must_match_the_budget_and_the_ratio(self) -> None:
+        # The planned gain is *derived*. Nothing in the sizer reads it, so an
+        # inconsistent pair would have passed every other test while the decision
+        # log advertised a gain the bridge never aimed for.
+        with pytest.raises(ValueError, match="does not match"):
+            self._budget(amount=Decimal("50"), reward_amount=Decimal("999"))
+
+    def test_a_consistent_reward_at_a_ratio_other_than_one_is_accepted(self) -> None:
+        assert self._budget(
+            amount=Decimal("50"), reward_risk_ratio=Decimal("2.5"), reward_amount=Decimal("125")
+        ).reward_amount == Decimal("125")
+
+    def test_the_reward_is_compared_as_a_number_not_as_text(self) -> None:
+        # `50` and `50.00` are the same money. A text comparison would reject a
+        # budget built by arithmetic that happens to carry a different exponent --
+        # which is every budget, since `amount * ratio` preserves whatever the
+        # operands had.
+        assert self._budget(
+            amount=Decimal("50"), reward_amount=Decimal("50.00"), reward_risk_ratio=Decimal("1")
+        ).reward_amount == Decimal("50.00")
+
     def test_is_frozen(self) -> None:
         with pytest.raises(AttributeError):
             self._budget().amount = Decimal("999")  # type: ignore[misc]
@@ -534,6 +556,83 @@ class TestTradeDecision:
         # The configured ratio is still 1.0 -- the achieved one differs, which is
         # exactly the distinction being pinned.
         assert off_ratio.risk_parameters.reward_risk_ratio == Decimal("1.0")
+
+    def test_an_intent_without_a_take_profit_is_constructible(self) -> None:
+        """`TakeProfitSource.NONE` must be representable.
+
+        It was not, until Phase 5. `take_profit` was mandatory while the
+        take-profit resolver correctly returns ``None`` for that policy, so the
+        model could not describe a trade the bridge had deliberately enabled.
+        Whoever wrote Phase 6 would have hit the mismatch, and the plausible way to
+        resolve it -- refusing the trades an operator asked for -- would have been
+        a silent policy change wearing the costume of a type error.
+        """
+        import dataclasses
+
+        intent = dataclasses.replace(self._intent(), take_profit=None)
+        assert intent.take_profit is None
+
+    def test_an_intent_without_a_take_profit_has_no_ratio_and_says_so(self) -> None:
+        import dataclasses
+
+        intent = dataclasses.replace(self._intent(), take_profit=None)
+        assert intent.reward_to_risk is None
+        payload = intent.to_dict()
+        assert payload["reward_to_risk"] is None
+        assert payload["take_profit"] is None
+        # `has_take_profit` exists because "the key is null" is a weaker statement
+        # than "this trade has no target", and a consumer reading the record should
+        # not have to infer one from the other.
+        assert payload["has_take_profit"] is False
+
+    def test_an_intent_with_a_take_profit_still_reports_true(self) -> None:
+        assert self._intent().to_dict()["has_take_profit"] is True
+
+    def test_serialising_an_intent_without_a_take_profit_does_not_divide(self) -> None:
+        # `to_dict` used to evaluate `reward_to_risk` unconditionally, so the
+        # `NONE` configuration would have raised rather than serialising. A record
+        # that cannot be written down is not a record.
+        import dataclasses
+
+        payload = dataclasses.replace(self._intent(), take_profit=None).to_dict()
+        assert payload["position_size"]["volume"] == "0.16"
+
+
+class TestCanonicalRatio:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("1.0", "1"),
+            ("1", "1"),
+            ("2.50", "2.5"),
+            ("0.20", "0.2"),
+            ("100", "100"),
+            ("0", "0"),
+        ],
+    )
+    def test_one_number_has_one_representation(self, raw: str, expected: str) -> None:
+        # The bug: the bridge wrote `"1"` for a ratio-derived target and `"1.0"`
+        # for the identical ratio derived from a signal's target, so a log query
+        # for one missed the other.
+        assert str(canonical_ratio(Decimal(raw))) == expected
+
+    def test_a_whole_number_does_not_become_exponent_notation(self) -> None:
+        # `Decimal("100").normalize()` is `1E+2`, so normalisation alone would
+        # have written a 100:1 configuration to the log as `1E+2`. That is why the
+        # positive-exponent case is quantised back rather than left alone.
+        assert "E" not in str(canonical_ratio(Decimal("100")))
+        assert "E" not in str(canonical_ratio(Decimal("1000")))
+
+    def test_a_long_fraction_keeps_its_precision(self) -> None:
+        # Normalising a ratio must not round it. A 1/3 target stays 0.333... and
+        # does not quietly become 0.33.
+        assert canonical_ratio(Decimal(1) / Decimal(3)) == Decimal(1) / Decimal(3)
+
+    def test_the_numeric_value_is_untouched(self) -> None:
+        # Only the representation changes, so anything doing arithmetic on the
+        # result is unaffected.
+        assert canonical_ratio(Decimal("1.50")) == Decimal("1.5")
+        assert canonical_ratio(Decimal("1.50") * 2) == Decimal("3")
 
 
 class TestExecutionResult:

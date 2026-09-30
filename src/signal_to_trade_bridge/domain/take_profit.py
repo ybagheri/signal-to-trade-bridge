@@ -33,10 +33,23 @@ different intentions:
   engine's own caveats may well want this, and it is not the same preference as
   the default.
 
+**The "1:1 as the floor" half of that sentence was not true until Phase 5.**
+Nothing compared the signal's implied ratio against anything, so a structurally
+sound target at 0.2:1 was accepted silently under the default policy and the
+configured ratio decided only the *fallback* distance. Phase 5 added
+:attr:`RiskParameters.minimum_reward_risk_ratio` to make the floor real --
+**off by default**, because turning it on starts replacing engine-measured
+targets with the configured distance, which is a trading decision rather than a
+bug fix. Set it equal to ``reward_risk_ratio`` for the behaviour the paragraph
+above has always described.
+
 **A fallback is never silent.** Every resolved take profit records its
 ``TakeProfitSource``, so a log can never make a 1:1 target look like the engine's
 own measured move. That distinction is the difference between an auditable
-decision and a plausible-looking number.
+decision and a plausible-looking number. **Every successful resolution also
+records ``achieved_ratio``** -- what the trade actually has, not what was
+configured -- and it is ``None`` only under ``NONE``, where there is no target and
+therefore no ratio.
 
 The same upstream caveat applies here as to the stop. The engine's target bases
 are ``MEASURED_MOVE``, ``FADE_ORIGIN`` and ``SWING`` for a level the market
@@ -52,7 +65,14 @@ from signal_to_trade_bridge.domain.enums import (
     RejectionReason,
     TakeProfitSource,
 )
-from signal_to_trade_bridge.domain.models import RiskParameters, Signal, StopLoss, TakeProfit
+from signal_to_trade_bridge.domain.models import (
+    RiskParameters,
+    Signal,
+    StopLoss,
+    TakeProfit,
+    achieved_ratio,
+    canonical_ratio,
+)
 from signal_to_trade_bridge.domain.resolution import Resolution, refused, resolved
 
 __all__ = [
@@ -61,6 +81,7 @@ __all__ = [
     "is_favourable",
     "is_structural_target_basis",
     "resolve_take_profit",
+    "signal_target_ratio",
     "target_from_ratio",
 ]
 
@@ -77,10 +98,55 @@ STRUCTURAL_TARGET_BASES: frozenset[str] = frozenset(
 #: A target derived from volatility rather than structure.
 VOLATILITY_TARGET_BASES: frozenset[str] = frozenset({"ATR_FALLBACK"})
 
-#: Reward distance is derived by scaling the risk distance, so a zero distance
-#: would divide by nothing. The stop resolver already refuses a zero distance, so
-#: this is a second line rather than the first.
-_MIN_RATIO = Decimal("0.000001")
+# Reward distance is derived by scaling the risk distance, so a zero distance would
+# divide by nothing. The stop resolver already refuses a zero distance, so
+# `target_from_ratio` guards it a second time. **There is deliberately no minimum
+# ratio constant here.** Phase 3 had one, `_MIN_RATIO`, with a docstring
+# explaining that a "minimum-ratio clamp" protected the target computation -- and
+# nothing referenced it. The guard that actually runs is `ratio <= 0` in
+# `target_from_ratio`, and `RiskParameters.minimum_reward_risk_ratio` is the real
+# minimum-ratio setting. A constant with a reassuring docstring and no reader is
+# worse than no constant: it makes the next person believe a clamp exists.
+
+
+def signal_target_ratio(stop: StopLoss, signal: Signal) -> Decimal | None:
+    """The reward:risk a signal's own target implies, or ``None`` if it has none.
+
+    Separate from :func:`~signal_to_trade_bridge.domain.models.achieved_ratio`
+    because this one takes a *signal*, and the whole question here is whether the
+    signal's target — a price that has not been accepted yet — would clear a floor.
+    Comparing an unaccepted target against a threshold is what
+    :attr:`RiskParameters.minimum_reward_risk_ratio` exists for.
+
+    ``None`` rather than zero when the signal has no target, so a caller can tell
+    "no target to judge" from "a target at 0.2:1, which is a judgement".
+    """
+    if signal.take_profit is None:
+        return None
+    entry = signal.entry
+    if entry is None or stop.distance <= 0:
+        return None
+    return canonical_ratio(abs(signal.take_profit - entry) / stop.distance)
+
+
+def _ratio(take_profit: TakeProfit, stop: StopLoss) -> str | None:
+    """``achieved_ratio`` as the string that goes into a decision record.
+
+    A thin wrapper rather than four inline calls, so the conversion from number to
+    log text happens once and `None` is handled in one place. Every path that
+    emits a take profit reports through here, which is what makes the guarantee
+    "``achieved_ratio`` is always present on a successful resolution, and is
+    ``None`` only when there is no target" true rather than aspirational.
+
+    A string because :attr:`~signal_to_trade_bridge.domain.resolution.Resolution.details`
+    is a record for a log and a later audit, and a ``Decimal`` in there serialises
+    through ``default=str`` at the formatter while comparing as a number in a test
+    -- one representation, two behaviours. The underlying
+    :func:`~signal_to_trade_bridge.domain.models.achieved_ratio` keeps the number
+    for anyone who wants to do arithmetic on it.
+    """
+    ratio = achieved_ratio(stop, take_profit)
+    return None if ratio is None else str(ratio)
 
 
 def is_structural_target_basis(basis: str) -> bool:
@@ -154,6 +220,11 @@ def resolve_take_profit(
         "policy": risk.take_profit_source.value,
         "stop_distance": str(stop.distance),
         "reward_risk_ratio": str(risk.reward_risk_ratio),
+        "minimum_reward_risk_ratio": (
+            str(risk.minimum_reward_risk_ratio)
+            if risk.minimum_reward_risk_ratio is not None
+            else None
+        ),
     }
     signal_target = signal.take_profit
     if signal_target is not None:
@@ -164,7 +235,19 @@ def resolve_take_profit(
 
     # -- NONE: a deliberate configuration, not a problem -------------------
     if policy is TakeProfitSource.NONE:
-        return resolved(None, reason_code="TARGET_DISABLED", **details)
+        # `achieved_ratio` is present and `None` rather than absent. Before Phase 5
+        # this key simply did not exist on this path, and the first consumer to
+        # index it would have raised `KeyError` on a *successful* resolution --
+        # which is the worst possible moment for a missing key, because the code
+        # around it has already decided the trade is fine. `None` says "there is
+        # no target, so there is no ratio", which is a different statement from a
+        # refusal and is the only thing `None` means anywhere in this type.
+        return resolved(
+            None,
+            reason_code="TARGET_DISABLED",
+            achieved_ratio=None,
+            **details,
+        )
 
     # -- Work out whether the signal's own target is usable ---------------
     unusable_reason = ""
@@ -181,6 +264,20 @@ def resolve_take_profit(
             f"the signal's target basis is {signal.take_profit_basis or 'unstated'}, which is a "
             f"volatility multiple rather than a level the market produced"
         )
+    else:
+        # The floor, checked last so that it only ever sees a target that is
+        # already acceptable on every other ground. Reporting "its basis was a
+        # volatility multiple" is more useful than "its ratio was 0.2:1" when both
+        # are true, because the basis is the upstream engine's own defect and the
+        # remedy is upstream.
+        floor = risk.minimum_reward_risk_ratio
+        implied = signal_target_ratio(stop, signal)
+        if floor is not None and implied is not None and implied < floor:
+            details["signal_target_ratio"] = str(implied)
+            unusable_reason = (
+                f"the signal's target of {signal_target} implies a reward:risk of "
+                f"{implied}, below the configured floor of {floor}"
+            )
 
     signal_target_usable = not unusable_reason
 
@@ -195,7 +292,7 @@ def resolve_take_profit(
             )
             return resolved(
                 take_profit,
-                achieved_ratio=str(take_profit.distance / stop.distance),
+                achieved_ratio=_ratio(take_profit, stop),
                 **details,
             )
         return refused(
@@ -240,7 +337,7 @@ def resolve_take_profit(
             details["signal_target_ignored"] = str(signal_target)
         return resolved(
             ratio_target,
-            achieved_ratio=str(ratio_target.distance / stop.distance),
+            achieved_ratio=_ratio(ratio_target, stop),
             **details,
         )
 
@@ -254,13 +351,13 @@ def resolve_take_profit(
         )
         return resolved(
             take_profit,
-            achieved_ratio=str(take_profit.distance / stop.distance),
+            achieved_ratio=_ratio(take_profit, stop),
             **details,
         )
 
     return resolved(
         ratio_target,
-        achieved_ratio=str(ratio_target.distance / stop.distance),
+        achieved_ratio=_ratio(ratio_target, stop),
         # Recorded explicitly rather than left to the source field alone, so a
         # log line shows *why* the ratio was used rather than only *that* it was.
         fallback_because=unusable_reason,
