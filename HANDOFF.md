@@ -744,9 +744,11 @@ itself must work on a laptop where nothing lives on `E:`.
 ## Git Status
 
 Branch `main`, tracking `origin/main`, working tree clean. Local and remote heads
-verified identical at the end of Phase 2.
+verified identical at the end of Phase 3.
 
 ```
+2ea3c93  feat: stop, take-profit and validation policies in the domain layer
+683fbda  docs: record the phase 2 commit hash, push status and the settled signal-id question
 6e264a2  feat: al brooks signal adapter, deterministic signal identity, mapping tests
 8e4431e  docs: record the phase 1 commit hash and push status in handoff
 dc336bd  feat: project foundation, domain layer, ports, config and test harness
@@ -758,6 +760,14 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 
 ## Latest Commit
 
+```
+2ea3c93d21f9598d814730bc75e16a27b4091419
+feat: stop, take-profit and validation policies in the domain layer
+```
+
+**Push status: SUCCESS** — `683fbda..2ea3c93  main -> main` on
+`git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
+afterwards and matches the local head exactly.
 ```
 6e264a25f198cdf68a1d50db074906c9ea002751
 feat: al brooks signal adapter, deterministic signal identity, mapping tests
