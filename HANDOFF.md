@@ -319,19 +319,36 @@ itself must work on a laptop where nothing lives on `E:`.
 
 ## Git Status
 
-At the end of Phase 0, on `main`, working tree clean, one commit:
+At the end of Phase 0: branch `main`, working tree clean, tracking
+`origin/main`.
 
 ```
-<hash>  docs: phase 0 architecture audit and integration contracts
+68c8b87  docs: phase 0 architecture audit and integration contracts
 ```
-
-Push status: see **Git** below.
 
 ---
 
 ## Latest Commit
 
-Populate after the Phase 0 commit is created.
+```
+68c8b87fb242c9e886773572fa14a2d2475d577e
+docs: phase 0 architecture audit and integration contracts
+```
+
+**Push status: SUCCESS** — `main` created on
+`git@github.com:ybagheri/signal-to-trade-bridge.git`.
+
+---
+
+## Chronological History
+
+- **Phase 0** — audited both upstream repositories by reading their source, not
+  their documentation alone. Established that position sizing, account data and
+  symbol specification exist in neither, that `auto-trade` is a UI-automation
+  bridge rather than an MT5 bindings client, and that `albrooks` emits a dict
+  rather than a signal object. Wrote `docs/architecture.md`,
+  `docs/integration.md`, `README.md`, `README_FA.md`, `.gitignore` and
+  `.gitattributes`. Committed and pushed as `68c8b87`.
 
 ---
 
