@@ -45,6 +45,8 @@ __all__ = [
     "TakeProfit",
     "TradeDecision",
     "TradeIntent",
+    "achieved_ratio",
+    "canonical_ratio",
     "utc_now",
 ]
 
@@ -488,6 +490,23 @@ class RiskParameters:
     risk_percent: Decimal = Decimal("0.5")
     #: Target reward divided by risk. ``1.0`` is 1:1.
     reward_risk_ratio: Decimal = Decimal("1.0")
+    #: The floor the achieved reward:risk must clear for a **signal's own** target
+    #: to be used. ``None`` (the default) disables the check, which means the
+    #: configured ratio decides only the *fallback* distance and any structurally
+    #: sound target is taken as the engine measured it.
+    #:
+    #: Added in Phase 5, and off by default on purpose. ``RR_FALLBACK`` has always
+    #: documented itself as "I want 1:1 as the floor", but nothing compared the
+    #: signal's implied ratio against anything, so a structurally sound target at
+    #: 0.2:1 was accepted silently under the default policy. Turning the floor on
+    #: is a trading decision -- it starts replacing engine targets with the
+    #: configured distance -- so it is opt-in rather than a change to what
+    #: ``RR_FALLBACK`` means for an existing deployment.
+    #:
+    #: It filters only the signal's target. Under ``RR_DERIVED`` there is no
+    #: candidate to filter and the configured ratio always wins, which is what
+    #: that policy is for.
+    minimum_reward_risk_ratio: Decimal | None = None
     #: Whether a signal's own target may be used, or the ratio always wins.
     take_profit_source: TakeProfitSource = TakeProfitSource.RR_FALLBACK
     #: Refuse a signal target that is not structurally defensible, using the
@@ -522,6 +541,15 @@ class RiskParameters:
             )
         if self.reward_risk_ratio <= 0:
             raise ValueError(f"reward_risk_ratio must be positive, got {self.reward_risk_ratio}")
+        if self.minimum_reward_risk_ratio is not None and self.minimum_reward_risk_ratio <= 0:
+            # Zero would refuse every target, which is what an absent floor means
+            # to say. The distinction is worth a validation error: a floor of
+            # zero and no floor at all look identical in a configuration file
+            # that was meant to set one.
+            raise ValueError(
+                f"minimum_reward_risk_ratio must be positive when set, got "
+                f"{self.minimum_reward_risk_ratio}; omit it entirely to disable the check"
+            )
         if self.max_spread is not None and self.max_spread <= 0:
             raise ValueError(f"max_spread must be positive when set, got {self.max_spread}")
         if self.max_open_positions is not None and self.max_open_positions < 0:
@@ -569,6 +597,11 @@ class RiskParameters:
         return {
             "risk_percent": str(self.risk_percent),
             "reward_risk_ratio": str(self.reward_risk_ratio),
+            "minimum_reward_risk_ratio": (
+                str(self.minimum_reward_risk_ratio)
+                if self.minimum_reward_risk_ratio is not None
+                else None
+            ),
             "take_profit_source": self.take_profit_source.value,
             "allow_volatility_fallback_stop": self.allow_volatility_fallback_stop,
             "minimum_evidence_score": self.minimum_evidence_score,
@@ -609,6 +642,9 @@ class RiskBudget:
     #: The planned gain at the configured ratio. Recorded rather than recomputed
     #: later, because the *achieved* ratio can differ from the configured one and
     #: a log reporting the configured number would report an intention as a fact.
+    #: **Derived, and checked against the ratio below** -- it is what
+    #: ``amount * reward_risk_ratio`` produces, so a value that does not satisfy
+    #: that is a mis-wiring rather than a different intent.
     reward_amount: Decimal
     #: The ratio ``reward_amount`` was derived from.
     reward_risk_ratio: Decimal
@@ -621,6 +657,21 @@ class RiskBudget:
             raise ValueError("currency is required")
         _positive(self.reward_amount, "reward amount")
         _positive(self.reward_risk_ratio, "reward_risk_ratio")
+        expected = self.amount * self.reward_risk_ratio
+        if self.reward_amount != expected:
+            # Not cosmetic. Nothing consumes `reward_amount` today -- the sizer
+            # needs only `amount` -- so an inconsistent pair would pass every test
+            # in the suite while the decision log advertised a planned gain the
+            # bridge never aimed for. Checked here rather than left to the call
+            # site because this model exists precisely so that it cannot be
+            # constructed wrong, and "derived, therefore derivable" is the kind of
+            # claim that rots the moment someone adds a field next to it.
+            raise ValueError(
+                f"reward_amount {self.reward_amount} does not match amount "
+                f"{self.amount} at a ratio of {self.reward_risk_ratio}, which gives "
+                f"{expected}. The planned gain is derived from the budget, not chosen "
+                f"separately."
+            )
 
     @property
     def fraction_of_balance(self) -> Decimal:
@@ -729,6 +780,64 @@ class PositionSize:
         }
 
 
+def canonical_ratio(value: Decimal) -> Decimal:
+    """One ratio in one representation.
+
+    ``Decimal`` carries its own exponent, and arithmetic leaves it wherever it
+    lands: ``Decimal("1") / Decimal("1")`` is ``1`` while
+    ``Decimal("1.0") / Decimal("1")`` is ``1.0``. Both are the same ratio, and
+    before Phase 5 the bridge reported whichever one the arithmetic happened to
+    produce -- so a decision record said ``"1"`` for a ratio-derived target and
+    ``"1.0"`` for the identical ratio derived from a signal's target, and a log
+    query for one of them missed the other.
+
+    Normalisation alone is not enough, and the reason matters: ``Decimal("100")
+    .normalize()`` is ``1E+2``, so a 100:1 configuration would have been written
+    to the log in exponent notation. Any positive exponent is therefore quantised
+    back to a plain integer before formatting.
+
+    Only the representation changes. Numeric equality is unaffected, so this is
+    safe to apply to a value someone is about to do arithmetic on.
+    """
+    normalised = value.normalize()
+    exponent = normalised.as_tuple().exponent
+    if isinstance(exponent, int) and exponent > 0:
+        return normalised.quantize(Decimal(1))
+    return normalised
+
+
+def achieved_ratio(stop: StopLoss, take_profit: TakeProfit | None) -> Decimal | None:
+    """The reward:risk a trade *actually* has, from the distances used.
+
+    One implementation, shared. Phase 5 replaced four inline copies in
+    :mod:`take_profit` and the property below with a call to this, because five
+    unshared copies of the same division is five places for one of them to be
+    edited and the other four to be quietly wrong -- and a decision log reporting
+    a different ratio from the one a policy checked is exactly the kind of
+    disagreement this project refuses to have between two of its own layers.
+
+    It lives here rather than in ``take_profit`` because :class:`TradeIntent` needs
+    it and ``take_profit`` imports this module; putting it there would be a cycle.
+
+    ``None`` when there is no take profit, which is a real configuration
+    (``TakeProfitSource.NONE``) rather than a missing value. Returning ``None``
+    rather than raising keeps "the trader deliberately disabled targets"
+    distinguishable from "the stop distance was zero", which would be a bug.
+    ``StopLoss`` validates a positive distance at construction, so the only way to
+    divide by zero here is an object that skipped it.
+
+    Not rounded, and not truncated. A 1:1 target at a 0.00300 stop divides to
+    exactly 1, and one at 0.00301 divides to something with a long tail; both are
+    the honest figure, and rounding a ratio for readability is how a 0.9:1 becomes
+    a 1:1 in a log. What *is* normalised is the representation -- see
+    :func:`canonical_ratio` -- so the same ratio never appears as both ``1`` and
+    ``1.0`` depending on which arithmetic produced it.
+    """
+    if take_profit is None or stop.distance <= 0:
+        return None
+    return canonical_ratio(take_profit.distance / stop.distance)
+
+
 @dataclass(frozen=True, slots=True)
 class TradeIntent:
     """A signal that has survived validation, sizing and risk, ready to execute.
@@ -736,6 +845,14 @@ class TradeIntent:
     Everything needed to place the order, and nothing that is not. Its existence
     means the trade passed every check; the decision record is what says so
     formally.
+
+    ``take_profit`` is optional because ``TakeProfitSource.NONE`` is a supported,
+    documented, tested configuration -- exits managed elsewhere. It was mandatory
+    until Phase 5, which made this class **unconstructible** under that policy: the
+    take-profit resolver correctly returns ``None`` for it, so whoever wrote
+    Phase 6 would have hit the mismatch and, plausibly, resolved it by refusing
+    the trades an operator had deliberately enabled. A model that cannot represent
+    a supported configuration is a bug that waits to be misdiagnosed.
     """
 
     signal: Signal
@@ -743,7 +860,7 @@ class TradeIntent:
     direction: Direction
     entry: Decimal
     stop_loss: StopLoss
-    take_profit: TakeProfit
+    take_profit: TakeProfit | None
     position_size: PositionSize
     risk_parameters: RiskParameters
     account_balance: AccountBalance
@@ -758,7 +875,7 @@ class TradeIntent:
         return self.position_size.risk_amount
 
     @property
-    def reward_to_risk(self) -> Decimal:
+    def reward_to_risk(self) -> Decimal | None:
         """Achieved reward:risk, from the distances actually used.
 
         Computed rather than copied from the configured ratio, because the
@@ -766,22 +883,27 @@ class TradeIntent:
         target used under the fallback policy does not produce exactly 1:1. A
         decision log that reported the configured ratio instead of the achieved
         one would be reporting an intention as a fact.
+
+        ``None`` when the configuration has no take profit at all, which is a
+        successful outcome and not a failure. See :func:`achieved_ratio`.
         """
-        return self.take_profit.distance / self.stop_loss.distance
+        return achieved_ratio(self.stop_loss, self.take_profit)
 
     def to_dict(self) -> dict[str, Any]:
+        ratio = self.reward_to_risk
         return {
             "signal_id": self.signal.signal_id,
             "symbol": self.symbol,
             "direction": self.direction.value,
             "entry": str(self.entry),
             "stop_loss": self.stop_loss.to_dict(),
-            "take_profit": self.take_profit.to_dict(),
+            "take_profit": self.take_profit.to_dict() if self.take_profit is not None else None,
             "position_size": self.position_size.to_dict(),
             "risk_parameters": self.risk_parameters.to_dict(),
             "account_balance": self.account_balance.to_dict(),
             "symbol_spec": self.symbol_spec.to_dict(),
-            "reward_to_risk": str(self.reward_to_risk),
+            "reward_to_risk": str(ratio) if ratio is not None else None,
+            "has_take_profit": self.take_profit is not None,
         }
 
 

@@ -189,6 +189,19 @@ side. `reward_to_risk` is `0.0` when `risk == 0` (never `inf`).
 `is_valid` is `not any(issue in BLOCKING_ISSUES for issue in issues)` and is
 arithmetic, not approval.
 
+> **The bridge reads none of `risk`, `reward`, `reward_to_risk` or
+> `risk_to_reward`.** The adapter's mapped decision fields are `action`, `reason`,
+> `subject`, `direction`, `plan` and `evidence`; the plan keys it reads are
+> `entry`, `stop`, `target`, `stop_basis`, `target_basis` and `entry_basis`.
+>
+> The engine does *rank* candidates partly on `reward_to_risk`, so discarding it
+> loses one line of diagnostic detail — a decision record cannot say the engine
+> chose this candidate partly on its own ratio. That is accepted on purpose: the
+> engine documents its own targets as unvalidated, and the bridge computes the
+> same ratio itself from distances it has already validated. Recorded here because
+> it looks like an oversight otherwise, and because a future upstream field that
+> *is* ratio-driven should be a decision rather than an accident.
+
 `BLOCKING_ISSUES` = `NO_DIRECTION`, `NO_ATR`, `ENTRY_UNDEFINED`,
 `STOP_UNDEFINED`, `STOP_NOT_PROTECTIVE`, `TARGET_UNDEFINED`, `TARGET_NOT_AHEAD`,
 `RISK_NOT_POSITIVE`.

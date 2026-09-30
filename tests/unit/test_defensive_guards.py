@@ -51,6 +51,12 @@ def _bypass(cls: type, **fields: object) -> object:
     mutated after construction. That is the right property for a value object and
     it is exactly what stops a test from constructing an invalid one the ordinary
     way -- so this is the only way to reach the guards those tests cannot.
+
+    **Every field has to be listed.** ``object.__new__`` leaves the slots unset, so
+    omitting one produces an ``AttributeError`` the first time the model reads it
+    rather than a clean failure -- which is why adding a field to a model breaks
+    these tests loudly. That is the intended signal: a model with a new field has
+    new guards to reach, or at least new places a bypassed object can be wrong.
     """
     instance = object.__new__(cls)
     for name, value in fields.items():
@@ -102,6 +108,7 @@ class TestTakeProfitWithAnImpossibleRatio:
             allowed_symbols=frozenset(),
             max_spread=None,
             max_open_positions=None,
+            minimum_reward_risk_ratio=None,
         )
         signal = Signal(
             signal_id="x",

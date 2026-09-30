@@ -264,9 +264,9 @@ class TestAMissingBalance:
             "layer obtained; it does not create one."
         )
 
-        # The budget's amount comes from the one implementation of the percentage
-        # calculation, so there cannot be a second one here that disagrees with
-        # it later.
+        # The budget's amount and its planned gain come from the one implementation
+        # of each calculation, so there cannot be a second one here that disagrees
+        # with it later.
         budget_calls = [
             node
             for node in ast.walk(tree)
@@ -275,13 +275,18 @@ class TestAMissingBalance:
             and node.func.id == "RiskBudget"
         ]
         assert budget_calls, "expected the module to construct a RiskBudget"
+        expected_source = {
+            "amount": "risk.risk_amount(effective)",
+            "reward_amount": "risk.reward_amount(effective)",
+        }
         for call in budget_calls:
-            amount = next(kw for kw in call.keywords if kw.arg == "amount")
-            assert ast.unparse(amount.value) == "risk.risk_amount(effective)", (
-                f"the budget amount came from {ast.unparse(amount.value)!r} rather than from "
-                f"RiskParameters.risk_amount. Two implementations of the same percentage "
-                f"calculation would eventually disagree."
-            )
+            for keyword, source in expected_source.items():
+                value = next(kw for kw in call.keywords if kw.arg == keyword)
+                assert ast.unparse(value.value) == source, (
+                    f"the budget's {keyword} came from {ast.unparse(value.value)!r} rather "
+                    f"than from RiskParameters. Two implementations of the same calculation "
+                    f"would eventually disagree."
+                )
 
 
 class TestImpossibleParameters:

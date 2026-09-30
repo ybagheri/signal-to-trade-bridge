@@ -223,6 +223,13 @@ The engine also validates the geometry itself, and exposes it as
 `abs(entry - stop)` and `reward_to_risk` is `reward / risk` (`0.0` when risk is
 `0`, never `inf`).
 
+Note the difference from the bridge's own ratio, because two zeroes would be easy
+to conflate: the engine reports **`0.0`** for a ratio it cannot compute, while
+`TradeIntent.reward_to_risk` and `domain.achieved_ratio` report **`None`** —
+because `None` here means "this trade has no target" (`TakeProfitSource.NONE`),
+which is a successful outcome, and `0.0` would read as a target at 0:1. The bridge
+does not reuse the engine's ratio at all; see §6.
+
 **Consequence for the bridge:** the engine has already answered "is there a
 defensible stop, and is it on the right side of entry". The bridge must re-check
 this rather than trust it, because `auto-trade` has no such check at all and a
@@ -721,7 +728,7 @@ pattern. `_flag` treats `{"1","true","yes","on"}` as true. The signal
 | 4 | Symbol specification | ✗ | ✗ | **New `SymbolSpec` + `SymbolSpecProvider` port + MT5 implementation + fake** |
 | 5 | Position sizing | ✗ | ✗ | **New sizing calculator, tick-value based, not Forex-assumed** |
 | 6 | Risk as % of balance | ✗ | ✗ | **New `RiskParameters` + risk amount calculation** |
-| 7 | Take-profit policy | `target` + `target_basis` | passed through | **Configurable `SIGNAL_IF_AVAILABLE_ELSE_RR`, never silently overriding** |
+| 7 | Take-profit policy | `target` + `target_basis` (its own `reward_to_risk` **discarded**) | passed through | **Configurable `RR_FALLBACK`, never silently overriding** |
 | 8 | Pre-trade validation | partial (`issues`, `is_valid`) | none (field read-back only) | **Full pipeline, fail-closed, structured reasons** |
 | 9 | Execution | ✗ | `ExecutionWorkflow.execute` | **Thin adapter; delegate, never re-implement** |
 | 10 | Idempotency | ✗ | `JsonExecutionLedger` | **Reuse; add a deterministic `signal_id` derived from signal content** |
@@ -831,20 +838,45 @@ Derived from §2.5, and it is not a free choice:
 
 ### 5.5 Take-profit policy
 
-`TAKE_PROFIT_SOURCE` with two documented values, default
-`SIGNAL_IF_AVAILABLE_ELSE_RR`:
+`TAKE_PROFIT_SOURCE` with four values, default `RR_FALLBACK`. **The names below
+are the code's**, and this section originally listed two that do not exist —
+`SIGNAL_IF_AVAILABLE_ELSE_RR` and `RR_ONLY` were proposals from Phase 0 that
+`domain/enums.py` never adopted. Corrected in Phase 5; if you are reading an
+older copy of this document, that is why the names look unfamiliar.
 
-* `SIGNAL_IF_AVAILABLE_ELSE_RR` — use `plan["target"]` when it is structurally
-  defensible (`target_basis` in `MEASURED_MOVE`, `FADE_ORIGIN`, `SWING`) and on
-  the correct side of entry; otherwise fall back to the R:R calculation.
-* `RR_ONLY` — ignore any signal target and always use `reward_risk_ratio`. This
+* `RR_FALLBACK` — use `plan["target"]` when it is structurally defensible
+  (`target_basis` in `MEASURED_MOVE`, `FADE_ORIGIN`, `SWING`), on the correct side
+  of entry, and above `MINIMUM_REWARD_RISK_RATIO`; otherwise fall back to the
+  R:R calculation.
+* `SIGNAL` — use `plan["target"]`, and refuse the trade if it is unusable on any
+  of those grounds.
+* `RR_DERIVED` — ignore any signal target and always use `reward_risk_ratio`. This
   exists because a 1:1 policy and a signal's own measured target are different
   intentions, and a trader may want the ratio to win.
+* `NONE` — no take profit, for a deployment that manages exits itself.
 
 Either way the bridge **never silently overrides** a signal target: when it
 falls back, the decision records `tp_source = "RR_FALLBACK"` and the reason. A
 `TARGET_UNDEFINED` or `TARGET_NOT_AHEAD` issue from the engine is treated as "no
 usable signal target", not as an error to be papered over.
+
+**The configured ratio is not a floor, and that was true until Phase 5.**
+`RR_FALLBACK` has described itself as "I want 1:1 as the floor", but nothing
+compared the signal's implied ratio against anything, so a structurally sound
+target at 0.2:1 was accepted silently under the default policy. Phase 5 added
+`MINIMUM_REWARD_RISK_RATIO`, **off by default**, because switching it on starts
+replacing engine-measured targets with the configured distance and that is a
+trading decision rather than a bridge upgrade.
+
+**The engine's own `reward_to_risk` is deliberately not used.** The adapter reads
+`action`, `reason`, `subject`, `direction`, `plan` and `evidence` from the
+decision dict and nothing else; the upstream ratio is not mapped, not carried in
+`source_metadata`, and not trusted. Two reasons: the engine documents its own
+targets as unvalidated, so a ratio derived from them inherits that; and a ratio
+computed here from distances the bridge has already validated is the same number
+with better provenance. The cost is diagnostic — a decision record cannot say the
+engine ranked a candidate highly partly on its own ratio — and that is a
+deliberate trade, not an oversight.
 
 ### 5.6 Position sizing — the part that must be built
 
