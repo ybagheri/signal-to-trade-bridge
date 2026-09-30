@@ -459,12 +459,14 @@ reason again.
 
 ```
 src/signal_to_trade_bridge/
-  domain/          models.py     twelve value objects
+  domain/          models.py     twelve value objects, achieved_ratio,
+                                canonical_ratio                Phase 5
                    enums.py      six enums, 39 rejection codes
                    errors.py     two roots, twelve exceptions
                    resolution.py Resolution[T]           Phase 3
                    stops.py      resolve_stop()          Phase 3
                    take_profit.py resolve_take_profit()  Phase 3
+                                signal_target_ratio()      Phase 5
                    validation.py four validation layers  Phase 3
                    risk.py       resolve_risk_budget()   Phase 4
                                 check_currency_compatibility()
@@ -491,7 +493,7 @@ tests/
                    test_logging.py            test_defensive_guards.py
                    test_domain_isolation.py
                    test_risk_budget.py        test_position_sizing.py
-                   test_risk_service.py
+                   test_risk_service.py       test_reward_risk_ratio.py
   integration/     test_albrooks_real.py            real Analyzer, opt-in
 docs/              architecture.md  integration.md  setup.md
                    signal-flow.md  risk-management.md
@@ -529,9 +531,15 @@ contract these already pin.
 
 ### Configuration
 
-`BridgeConfig` + `config_from_env`, reading 16 `BRIDGE_*` variables. Defaults are
-the safe ones: `execution_enabled=False`, `dry_run=True`, `risk_percent=0.5`,
+`BridgeConfig` + `config_from_env`, reading **17** `BRIDGE_*` variables. Defaults
+are the safe ones: `execution_enabled=False`, `dry_run=True`, `risk_percent=0.5`,
 `reward_risk_ratio=1.0`.
+
+**A configured `0` is refused, not defaulted.** Phase 5 fixed `_decimal(...) or
+default` on the two money settings: `Decimal("0")` is falsy, so
+`BRIDGE_RISK_PERCENT=0` used to start the bridge at 0.5%. A blank value still
+means "unset", which is the only distinction that matters — between "the operator
+said nothing" and "the operator said zero".
 
 ### Logging
 
@@ -1254,10 +1262,13 @@ except MT5 itself must work on a laptop where nothing lives on `D:`.
 
 ## Git Status
 
-Branch `main`, tracking `origin/main`. Working tree state at the time Phase 4
+Branch `main`, tracking `origin/main`. Working tree state at the time Phase 5
 was written: see the commit list below.
 
 ```
+3f8d21e  feat: finish the reward:risk policy, and fix four ways it was not what it said
+7c9bb99  docs: record the phase 4 commit hash, push status, and what this machine could not verify
+f250a4f  feat: risk management and position sizing, and fix the tick value divisor
 631ec6a  docs: record the documentation-sync commit and note the one-commit lag
 d7f093d  docs: correct stale sections in the handoff and sync both READMEs
 2ea3954  docs: record the phase 3 commit hash, push status and the settled signal-id question
@@ -1275,11 +1286,11 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-f250a4fb1a735cf9dd9187237796215374390287
-feat: risk management and position sizing, and fix the tick value divisor
+3f8d21e5b52b4d76f1f30a9bd8000ff0acee2d5d
+feat: finish the reward:risk policy, and fix four ways it was not what it said
 ```
 
-**Push status: SUCCESS** — `631ec6a..f250a4f  main -> main` on
+**Push status: SUCCESS** — `7c9bb99..3f8d21e  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
 
@@ -1292,21 +1303,19 @@ afterwards and matches the local head exactly.
 ### What could not be verified on this machine
 
 Recorded rather than glossed over, because the alternative is a handoff that
-claims more than anyone checked:
+claims more than anyone checked. Unchanged from Phase 4 — neither phase touched an
+adapter, and neither could collect the integration tests:
 
-* **`pytest tests/integration` did not run.** The nine tests against the real
-  `Analyzer` collect only when `albrooks` is installed, and it is not installed
-  here — the module skips at import. The previous phase verified them green and
-  Phase 4 touches no adapter code, so they are *expected* to be unchanged. They
-  have **not** been run. Run `pytest tests/integration -v` on a machine with the
-  upstream checkout before relying on that.
-* **The MT5 terminal build is unknown.** This machine has Alpari MT5 `_4`, and
-  `auto-trade`'s control ids were measured on build 6184. Nothing was clicked and
-  no terminal was opened, so nothing is broken — but Known Issue 5 is unresolved
-  and Phase 11 owns it.
-* **No upstream checkouts exist here.** `E:\al-brooks-price-action-engine` and
-  `E:\auto-trade` from the old environment section are gone; this machine has
-  neither. `scripts/setup.ps1` has not been run.
+* **`pytest tests/integration` has not run in two phases.** The nine tests against
+  the real `Analyzer` collect only when `albrooks` is installed, and it is not
+  installed here. Phase 3 verified them green. Phases 4 and 5 touch no adapter
+  code, so they are *expected* to be unchanged — and they have **not** been run.
+  Run `pytest tests/integration -v` on a machine with the upstream checkout.
+* **The MT5 terminal build is unknown.** Alpari MT5 `_4`, and `auto-trade`'s
+  control ids were measured on build 6184. Nothing was clicked and no terminal was
+  opened, so nothing is broken — Known Issue 5 is unresolved and Phase 11 owns it.
+* **No upstream checkouts exist here**, so `scripts/setup.ps1` has not been run on
+  this machine either.
 
 ---
 
