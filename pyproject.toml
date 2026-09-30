@@ -1,0 +1,144 @@
+[build-system]
+# setuptools>=77 is required for the SPDX `license` string and `license-files`
+# used below, matching the albrooks engine's own build requirement so the two
+# can be installed into one environment without a version conflict.
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signal-to-trade-bridge"
+version = "0.1.0"
+description = "A safe, object-oriented bridge from Al Brooks price-action signals to automated trade execution"
+readme = "README.md"
+# >=3.11 because auto-trade requires >=3.11. albrooks requires only >=3.10, so
+# 3.11 is the binding floor, not an arbitrary choice.
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "trading",
+    "risk management",
+    "position sizing",
+    "price action",
+    "meta trader 5",
+    "integration",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# The domain layer has NO runtime dependencies, deliberately. It must be
+# testable and importable on a machine where neither upstream project is
+# installed, because both are private repositories that cannot be resolved from
+# an index. Every external project is reached through a Protocol in
+# `signal_to_trade_bridge.ports`, and every concrete integration lives in
+# `signal_to_trade_bridge.adapters`.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]
+# Windows-only. `MetaTrader5` is the official MT5 python binding, used by the
+# MT5 account/symbol adapter; `pywinauto` is pulled in transitively by auto-trade
+# and is listed here so a Windows environment can be provisioned in one step.
+windows = [
+    "MetaTrader5>=5.0.45",
+    "pywinauto>=0.6.9",
+]
+# The two upstream projects. See docs/architecture.md section 7 for why they are
+# not git, submodule or PyPI dependencies.
+#
+# The values below are PLACEHOLDERS. `scripts/setup.ps1` and `scripts/setup.sh`
+# rewrite them from the ALBROOKS_PATH and AUTO_TRADE_PATH environment variables,
+# so that no drive letter is ever committed. Do not install these extras before
+# running the setup script, and do not edit them by hand.
+albrooks = ["albrooks @ file:///PATH/TO/al-brooks-price-action-engine"]
+auto-trade = ["auto-trade @ file:///PATH/TO/auto-trade"]
+
+[project.scripts]
+signal-to-trade-bridge = "signal_to_trade_bridge.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+signal_to_trade_bridge = ["py.typed"]
+
+[tool.pytest.ini_options]
+# This key lives inside [tool.pytest.ini_options], which is the correct place
+# for it. albrooks' pyproject.toml has it at the top level, where setuptools
+# parses it as an extra requirement group instead; see docs/integration.md.
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers --strict-config"
+markers = [
+    "mt5: requires a running MetaTrader 5 terminal. Skipped unless BRIDGE_ALLOW_MT5_TESTS=1.",
+    "integration: exercises adapters across module boundaries without a live terminal.",
+    "e2e: end-to-end flow from a signal through to an execution result.",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # The domain models mirror upstream dict shapes and use a few names that
+    # shadow builtins by convention (`id`, `type`). Renaming them would make the
+    # mapping from an upstream field to a domain field harder to read, which is
+    # the opposite of what this rule is for.
+    "A002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on values and build fixtures inline; long literal lines and
+# unused-argument stubs are noise there, not signal.
+"tests/**" = ["E501", "B011", "RUF012"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/signal_to_trade_bridge"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+warn_return_any = true
+
+# MetaTrader5 ships no type information and is not installed on CI. It is
+# imported in exactly one module, `adapters/mt5/bindings.py`, and that module
+# already declares its own Protocol for the subset of the API it uses, so the
+# override is scoped as narrowly as possible: silencing it package-wide would
+# remove the check from the domain, which is where it matters most.
+#
+# albrooks and auto-trade are handled the same way, for the same reason plus one
+# more: they are private repositories, so CI cannot install them either.
+[[tool.mypy.overrides]]
+module = ["MetaTrader5", "MetaTrader5.*", "albrooks.*", "auto_trade.*"]
+ignore_missing_imports = true
+
+# The adapters are the boundary where untyped third-party data becomes typed
+# domain objects. Untyped defs there would defeat the point of the boundary, so
+# the domain is held to `disallow_untyped_defs` and the adapters are held to it
+# too. This override exists only to allow `Any` to cross that boundary, not to
+# allow untyped functions.
+[[tool.mypy.overrides]]
+module = ["signal_to_trade_bridge.adapters.*"]
+disallow_any_explicit = false

@@ -12,17 +12,20 @@
 
 ## Current Status
 
-**Phase 0 complete. Phase 1 not started.**
+**Phases 0 and 1 complete. Phase 2 not started.**
 
-Phase 0 was a repository audit. No trading code exists in this repository yet, and
-that is deliberate: the audit found that the design decisions required by the brief
-depend on facts that had to be read out of the two upstream source trees rather than
-assumed. `docs/architecture.md` and `docs/integration.md` are the deliverables.
+Phase 0 was a repository audit. Phase 1 built the project foundation: packaging,
+the domain layer, the ports, configuration, structured logging, and a 126-test
+suite that runs without MetaTrader 5 and without either upstream project
+installed.
+
+No trading code exists yet, and that is correct: the pipeline that reads a signal
+and produces an order is Phases 2 through 8.
 
 ```
-Last completed phase: 0
-Current phase:        1 (not started)
-Next phase:           1 — project foundation
+Last completed phase: 1
+Current phase:        2 (not started)
+Next phase:           2 — Al Brooks signal adapter
 ```
 
 ---
@@ -30,7 +33,7 @@ Next phase:           1 — project foundation
 ## Completed Phases
 
 - [x] **Phase 0** — Repository discovery and architecture audit
-- [ ] Phase 1 — Project foundation
+- [x] **Phase 1** — Project foundation
 - [ ] Phase 2 — Al Brooks signal adapter
 - [ ] Phase 3 — Internal trading domain
 - [ ] Phase 4 — Risk management
@@ -43,6 +46,72 @@ Next phase:           1 — project foundation
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
+
+---
+
+## What Phase 1 Built
+
+### Layout
+
+```
+src/signal_to_trade_bridge/
+  domain/          models.py  enums.py  errors.py     no external deps at all
+  ports/           __init__.py                        six Protocols
+  application/     __init__.py                        empty; ProcessSignal is Phase 6
+  adapters/        albrooks/ auto_trade/ mt5/ fake/   all empty; filled in Phases 2, 7, 7
+  infrastructure/  logging/                           structured.py  events.py
+  configuration/   config.py                          BridgeConfig  config_from_env
+  cli/             __init__.py                        empty; CLI is Phase 8
+  py.typed
+tests/
+  conftest.py                                      fixtures, PROJECT_ROOT
+  unit/            test_domain_isolation.py  test_domain_models.py
+                   test_configuration.py     test_logging.py
+docs/              architecture.md  integration.md  setup.md
+scripts/           setup.ps1  setup.sh  test.ps1
+```
+
+### Domain layer
+
+Frozen, slotted, self-validating dataclasses: `AccountBalance`, `SymbolSpec`,
+`Signal`, `StopLoss`, `TakeProfit`, `RiskParameters`, `PositionSize`,
+`TradeIntent`, `ExecutionRequest`, `ExecutionResult`, `TradeDecision`.
+
+Enums: `Direction`, `SignalAction`, `DecisionAction`, `StopSource`,
+`TakeProfitSource`, `RejectionReason` (39 codes).
+
+Errors: two roots, `ConfigurationError` and `TradingError`, with twelve
+subclasses. The split is deliberate — a configuration error should stop the
+process, a refused trade should be logged and the next signal processed.
+
+### Ports
+
+Six `Protocol`s: `SignalSource`, `MarketDataProvider`, `AccountProvider`,
+`SymbolSpecProvider`, `TradeExecutor`, `IdempotencyStore`, `KillSwitch`. Narrow
+on purpose, because a test has to fake them.
+
+### Configuration
+
+`BridgeConfig` + `config_from_env`, reading 16 `BRIDGE_*` variables. Defaults are
+the safe ones: `execution_enabled=False`, `dry_run=True`, `risk_percent=0.5`,
+`reward_risk_ratio=1.0`.
+
+### Logging
+
+`Event` enum with 12 event names, `StructuredLogger`, JSON and text formatters,
+and substring-based redaction of 13 sensitive key markers.
+
+### Tests: 126, all passing
+
+| File | Covers |
+|---|---|
+| `test_domain_isolation.py` | 7 tests. The architectural invariant: the domain imports nothing external, and no upstream project. |
+| `test_domain_models.py` | 70 tests. Every value object, its validation, and its invariants. |
+| `test_configuration.py` | 33 tests. Defaults, overrides, and failing loudly. |
+| `test_logging.py` | 28 tests. Redaction, JSON shape, handler hygiene, event vocabulary. |
+
+Quality gate, all clean: `ruff check`, `ruff format --check`, `mypy` (20 files),
+`pytest`.
 
 ---
 
@@ -92,24 +161,28 @@ than in an assumption.
 
 ## Current Architecture
 
-Proposed in Phase 0, implemented from Phase 1. Full rationale in
+Proposed in Phase 0, scaffolded in Phase 1. Full rationale in
 `docs/architecture.md §5`.
 
 ```
-interfaces/     CLI, wiring, composition root
-application/    ProcessSignal — the single use case
+interfaces/     CLI, wiring, composition root          (Phase 8)
+application/    ProcessSignal — the single use case    (Phase 6)
 domain/         Signal, TradeIntent, RiskParameters, PositionSize, TradeDecision,
-                SymbolSpec, AccountBalance, and the pure calculations
+                SymbolSpec, AccountBalance, and the pure calculations   (Phases 1, 3, 4)
 ports/          Protocols: SignalSource, MarketDataProvider, AccountProvider,
-                SymbolSpecProvider, TradeExecutor, IdempotencyStore
+                SymbolSpecProvider, TradeExecutor, IdempotencyStore  (Phase 1)
 adapters/       albrooks/  auto-trade/  mt5/  fake/
+                albrooks → Phase 2   auto-trade + mt5 → Phase 7   fake → Phase 7
 ```
 
 Dependency direction is strictly inward. `domain` imports nothing from any other
-layer and nothing from `adapters/`. Every upstream project is reached only through a
-protocol in `ports/`.
+layer and nothing from `adapters/`, and this is **enforced by a test** that walks
+the domain package's AST rather than being left as a convention. Both upstreams
+are private repositories that cannot be installed from an index, so a domain
+import of either would make the entire test suite unrunnable on any other
+machine. The safety net would only exist where the code was written.
 
-Decisions already made in Phase 0 and carried forward:
+Decisions made in Phase 0 and carried forward:
 
 - **`Decimal` for prices, volumes and money** in the domain. Upstream A uses
   `float`, upstream B uses `Decimal`; a `0.01` lot error on a gold contract is a
@@ -118,14 +191,36 @@ Decisions already made in Phase 0 and carried forward:
   futures-like instruments work.
 - **The worse of `tick_value_profit` / `tick_value_loss`** is used, because a size
   that is safe on paper must be safe on the losing side.
-- **Volume below `volume_min` is a refusal, never a floor-up.** The single most
-  dangerous line in a position sizer.
+- **Volume below `volume_min` is a refusal, never a floor-up.** Enforced in
+  `SymbolSpec.clamp_volume` (clamps *down* to zero, forcing the caller to notice)
+  and again in `PositionSize.__post_init__`, which raises if
+  `clamped_to_minimum` is ever set. Two independent guards, because this is the
+  single most dangerous line in a position sizer.
 - **Rounding to `volume_step` is always down.**
-- **`auto-trade`'s `ExecutionWorkflow` is wrapped, never bypassed.** Calling its
-  adapter directly would skip the risk engine, the kill switch, the ledger, the
-  state machine and the audit log.
+- **`auto-trade`'s `ExecutionWorkflow` will be wrapped, never bypassed.** Calling
+  its adapter directly would skip the risk engine, the kill switch, the ledger,
+  the state machine and the audit log.
 - **A fake `TradeExecutor` implements the same port as the real one**, so a test
   asserting on recorded orders exercises the real pipeline.
+
+Decisions made in Phase 1:
+
+- **Two error roots, not one.** `ConfigurationError` (stop the process) and
+  `TradingError` (refuse this trade, keep going). Flattening them would mean
+  either halting on a routine refusal or ignoring a broken configuration.
+- **`BRIDGE_` prefix for every environment variable.** The execution project uses
+  `AUTO_TRADE_`, several of whose defaults are absolute paths on another machine.
+  A distinct prefix makes it legible in a process listing that the bridge reads
+  none of them.
+- **Configuration fails loudly.** An unparsable value raises rather than falling
+  back to a default, because a risk percentage that quietly reverted to 0.5
+  because of a typo would leave a system trading at a level nobody chose.
+- **The evidence threshold is named `minimum_evidence_score`, not
+  `minimum_signal_confidence`.** See the audit's fifth finding.
+- **Redaction is substring-based and broad.** A key merely *containing* `token` is
+  redacted. The cost of redacting a harmless field is a slightly less informative
+  log line; the cost of missing one is a leaked credential in a file that
+  eventually gets pasted into a bug report.
 
 ---
 
@@ -151,31 +246,63 @@ likely to re-litigate by accident.
 
 ## Implemented Features
 
-None. Phase 0 produced documentation only, which is the correct output for an
-audit phase.
+Phase 1 produced a working foundation rather than a trading capability. What
+exists and works:
 
-Delivered:
+- The **domain layer**, importable and testable with zero external dependencies.
+- The **ports**, as the only thing the inner layers may depend on.
+- **Configuration** that defaults to safe and fails loudly on a mistake.
+- **Structured logging** with a fixed event vocabulary and automatic redaction.
+- A **126-test suite** that runs in under a second, with no MetaTrader terminal,
+  no network and no upstream project installed.
+- **Setup scripts** for Windows, Linux and macOS, with no committed drive letter.
+- **Documentation**: architecture, integration contracts, setup, bilingual README.
 
-- `docs/architecture.md` — the design and the gap analysis
-- `docs/integration.md` — verbatim upstream API contracts and a do-not-assume
-  checklist
-- `README.md` — English, authoritative
-- `README_FA.md` — Persian, linked from the English README
-- `HANDOFF.md` — this file
+Not yet implemented, and not to be assumed: any part of the decision pipeline. A
+signal still goes nowhere. Phases 2 through 8 build it.
 
 ---
 
 ## Tests
 
-None yet. The test harness arrives in Phase 1.
+**126 tests, all passing.** The suite runs in under a second and requires no
+MetaTrader terminal, no network access, and neither upstream project installed.
 
-What the audit established about the upstream suites, for reference:
+| File | Tests | Covers |
+|---|---|---|
+| `tests/unit/test_domain_isolation.py` | 7 | The architectural invariant: the domain imports nothing external and no upstream project. Walks the AST rather than importing. |
+| `tests/unit/test_domain_models.py` | 70 | Every value object, its validation, and its invariants — including the floor-up refusal and the unknown-status normalisation. |
+| `tests/unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
+| `tests/unit/test_logging.py` | 28 | Redaction cannot be bypassed, JSON shape, handler hygiene, event vocabulary completeness. |
 
-- `albrooks`: ~825 tests over 40 files, pytest, plus a 5-chart golden fixture set
-  and an MQL5 parity harness. Live-terminal tests **skip** without a terminal — and
-  its own `HANDOFF.md` states that **a skip is not a pass**.
-- `auto-trade`: pytest with a `scripts/test.ps1` gate. MT5 access is mocked
-  throughout; no test requires a live terminal.
+The full gate, all clean:
+
+```
+ruff check .            All checks passed!
+ruff format --check .   34 files already formatted
+mypy                    Success: no issues found in 20 source files
+pytest                  126 passed
+```
+
+`mypy` reports one informational note — an unused `[[tool.mypy.overrides]]` block
+for `MetaTrader5` / `albrooks` / `auto_trade`. It becomes used in Phases 2 and 7
+when the adapters that import them are written. Not an error, and deliberately
+left in place rather than added later, so the ignore exists before the import
+does.
+
+The test counts here are a claim that every later change falsifies. **CI is the
+authority on what passes**; this table is a convenience.
+
+### Tests deliberately not written yet
+
+The brief's Phase 1 does not require them, and writing them before the code they
+test exists would be theatre:
+
+* position-sizing tests — Phase 4
+* signal adapter tests — Phase 2
+* idempotency tests — Phase 9
+* end-to-end tests — Phase 10
+* live MT5 tests — Phase 11, and only behind an explicit opt-in marker
 
 ---
 
@@ -216,29 +343,48 @@ to fix without the maintainer's agreement.
 
 ## Remaining Work
 
-### Phase 1 — project foundation
+### Phase 2 — Al Brooks signal adapter  ← next
 
-- `pyproject.toml`: setuptools, src layout, `requires-python = ">=3.11"`, ruff,
-  mypy, pytest config. **Both upstreams require ≥3.10 and ≥3.11 respectively, so
-  the bridge requires ≥3.11.**
-- Directory skeleton: `domain/`, `application/`, `ports/`, `adapters/`,
-  `interfaces/`, `tests/`.
-- Configuration system: `risk_percent` (default `0.5`), `reward_risk_ratio`
-  (default `1.0`), `take_profit_source`, `dry_run`, `execution_enabled`, and the
-  rest deferred until a phase justifies them.
-- Structured logging foundation.
-- Test harness: pytest, plus a test that asserts the domain package's import
-  closure contains no `adapters/` import.
-- `.env.example`, `.gitignore` covering secrets.
-- `scripts/setup.ps1` and `scripts/setup.sh` that generate the local path
-  dependencies from `ALBROOKS_PATH` and `AUTO_TRADE_PATH` — **no drive letter
-  committed**.
-- Install instructions for Windows and Linux.
+The first adapter, and the one that proves the anti-corruption layer works.
 
-### Phases 2–13
+- `adapters/albrooks/source.py` — `AlBrooksSignalSource`, implementing
+  `SignalSource`. Wraps `Analyzer.analyze(...)` and converts
+  `AnalysisResult` into the internal `Signal`.
+- `adapters/albrooks/identity.py` — the deterministic `signal_id`. See Open
+  Question 1; this is the phase that has to settle it.
+- `adapters/albrooks/mapper.py` — the decision-dict reading. **Read every key
+  with `.get()`**: the degenerate path returns three keys, not thirteen.
+- Import `albrooks` lazily, inside the adapter, so that importing the bridge
+  still works without it installed.
+- Tests with a **stub analyzer**, not the real one, so the suite keeps running
+  without the upstream checkout. Add a separate, opt-in integration test that
+  runs the real `Analyzer` and is skipped when it is absent.
 
-As laid out in `README.md`. Phase 4 is the substantial one: the tick-value position
-sizer with broker constraint handling, and the refusal-not-floor-up rule.
+The mapping rules, from the audit:
+
+| Upstream | Internal |
+|---|---|
+| `decision["action"]` `BUY`/`SELL` | `SignalAction.BUY`/`SELL` |
+| `decision["action"]` `WAIT` | `SignalAction.WAIT` (abstention, `Direction.FLAT`) |
+| `decision["action"]` `NO_TRADE` | `SignalAction.NO_TRADE` (abstention, `Direction.FLAT`) |
+| `decision["direction"]` ±1/0 | `Direction.from_sign(...)` |
+| `decision["plan"]["entry"]` | `Signal.entry` |
+| `decision["plan"]["stop"]` + `stop_basis` | `Signal.stop_loss` + `Signal.stop_basis` |
+| `decision["plan"]["target"]` + `target_basis` | `Signal.take_profit` + `Signal.take_profit_basis` |
+| `decision["subject"]` | `Signal.setup_id` |
+| `decision["evidence"]["value"]` | `Signal.evidence_score` — **not a probability** |
+| `AnalysisResult.last_closed_bar` | `Signal.bar_index` |
+| `Bar.time` of the last closed bar | `Signal.bar_time` (float epoch seconds) |
+| missing `plan` | no stop, no target → the risk service refuses in Phase 4 |
+
+`WAIT` and `NO_TRADE` both become abstentions, and **both must be preserved as
+different values**. They are different upstream claims, and collapsing them would
+lose the ability to explain afterwards why nothing happened.
+
+### Phases 3–13
+
+As laid out in `README.md`. Phase 4 is the substantial one — the tick-value
+position sizer with broker constraint handling.
 
 ---
 
@@ -319,10 +465,13 @@ itself must work on a laptop where nothing lives on `E:`.
 
 ## Git Status
 
-At the end of Phase 0: branch `main`, working tree clean, tracking
-`origin/main`.
+Branch `main`, tracking `origin/main`. See **Latest Commit** below for the current
+head.
+
+Phase 0 commits, both pushed:
 
 ```
+19e4888  docs: record phase 0 commit hash and push status in handoff
 68c8b87  docs: phase 0 architecture audit and integration contracts
 ```
 
@@ -330,13 +479,9 @@ At the end of Phase 0: branch `main`, working tree clean, tracking
 
 ## Latest Commit
 
-```
-68c8b87fb242c9e886773572fa14a2d2475d577e
-docs: phase 0 architecture audit and integration contracts
-```
-
-**Push status: SUCCESS** — `main` created on
-`git@github.com:ybagheri/signal-to-trade-bridge.git`.
+Populated at the end of Phase 1. Push status recorded here after the push is
+confirmed, never assumed — a claimed push that did not happen is worse than no
+claim, because the next contributor will assume the work is safe upstream.
 
 ---
 
@@ -348,7 +493,35 @@ docs: phase 0 architecture audit and integration contracts
   bridge rather than an MT5 bindings client, and that `albrooks` emits a dict
   rather than a signal object. Wrote `docs/architecture.md`,
   `docs/integration.md`, `README.md`, `README_FA.md`, `.gitignore` and
-  `.gitattributes`. Committed and pushed as `68c8b87`.
+  `.gitattributes`. Committed and pushed as `68c8b87`, then `19e4888`.
+
+- **Phase 1** — built the foundation. `pyproject.toml` (setuptools, src layout,
+  Python ≥3.11, ruff, mypy, pytest, the `mt5` marker). The domain layer:
+  eleven frozen value objects, six enums, a 39-code `RejectionReason`, and
+  twelve exception classes under two roots. Seven ports. `BridgeConfig` with 16
+  `BRIDGE_*` settings that default to safe and fail loudly. Structured logging
+  with a 12-event vocabulary and substring-based redaction. 126 tests, including
+  a domain-isolation test that walks the AST. Setup scripts for three platforms
+  with no committed drive letter, `docs/setup.md`, and `LICENSE`.
+
+  Three real bugs were found by the tests and fixed, rather than the tests being
+  adjusted to pass:
+  - `config_from_env` used `bar_count=_int(...) or 300`, so a configured `0` was
+    falsy and silently replaced by the default. The `or` idiom hid the very
+    value validation was supposed to catch. Now `_require_int`.
+  - `SymbolSpec.clamp_volume` documented that it would never raise a volume to
+    the broker minimum, but implemented `min(max(v, 0), max)` — which returned a
+    sub-minimum volume unchanged. That looks like a usable volume, and a caller
+    checking only "is it in range" would pass it to the broker. Now clamps
+    sub-minimum to zero, which is unambiguously invalid.
+  - The `infrastructure/logging/__init__.py` re-exported event names as module
+    constants, but the names are members of a single `Event` enum. The import
+    failed at module load.
+
+  One test was also wrong rather than the code, and was corrected: it built a
+  modified frozen+slotted model with `{**intent.__dict__}`, which cannot work
+  because such a model has no `__dict__`. Now uses `dataclasses.replace`, which
+  also re-runs validation.
 
 ---
 

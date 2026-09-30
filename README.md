@@ -55,8 +55,8 @@ either.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Repository audit, architecture, integration contracts | ✅ complete |
-| 1 | Project foundation, packaging, configuration, test harness | ⬜ next |
-| 2 | Al Brooks signal adapter | ⬜ |
+| 1 | Project foundation, packaging, configuration, test harness | ✅ complete |
+| 2 | Al Brooks signal adapter | ⬜ next |
 | 3 | Internal trading domain | ⬜ |
 | 4 | Risk management and position sizing | ⬜ |
 | 5 | 1:1 risk/reward take-profit policy | ⬜ |
@@ -69,6 +69,30 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
+**126 tests passing.** Lint, format, type check and the domain-isolation check
+all clean.
+
+---
+
+## Quick start
+
+```powershell
+git clone git@github.com:ybagheri/signal-to-trade-bridge.git
+cd signal-to-trade-bridge
+
+# Point at your local checkouts of the two upstream projects. Any path works.
+$env:ALBROOKS_PATH   = 'E:\al-brooks-price-action-engine'
+$env:AUTO_TRADE_PATH = 'E:\auto-trade'
+
+.\scripts\setup.ps1
+Copy-Item .env.example .env
+
+.\scripts\test.ps1
+```
+
+Full instructions, including Linux and macOS, are in
+[docs/setup.md](docs/setup.md).
+
 ---
 
 ## Documentation
@@ -77,6 +101,7 @@ either.
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | The design, and why each decision was made |
 | [docs/integration.md](docs/integration.md) | The exact upstream APIs this bridge calls, quoted from source |
+| [docs/setup.md](docs/setup.md) | How to install and run it on a laptop |
 | [HANDOFF.md](HANDOFF.md) | Where the project stands, and how to continue it |
 
 ---

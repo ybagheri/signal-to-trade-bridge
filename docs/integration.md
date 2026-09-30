@@ -16,8 +16,11 @@ from albrooks import Analyzer, AnalyzerConfig, Bar, BarSeries
 from albrooks.engine.pipeline import analyze_multi_timeframe
 from albrooks.decision.engine import Action
 from albrooks.trade.plan import (
-    STOP_BASIS_ATR, STOP_BASIS_NONE,
-    TARGET_BASIS_MEASURED_MOVE, TARGET_BASIS_FADE_ORIGIN, TARGET_BASIS_SWING,
+    STOP_BASIS_ATR,
+    STOP_BASIS_NONE,
+    TARGET_BASIS_MEASURED_MOVE,
+    TARGET_BASIS_FADE_ORIGIN,
+    TARGET_BASIS_SWING,
     BLOCKING_ISSUES,
 )
 from albrooks.adapters.mt5 import MT5Feed, M15, M30, H1, H4, TIMEFRAMES
@@ -55,7 +58,7 @@ Behaviour that the adapter depends on:
 ```python
 @dataclass(frozen=True, slots=True)
 class Bar:
-    time: float      # bar OPEN time, Unix epoch SECONDS
+    time: float  # bar OPEN time, Unix epoch SECONDS
     open: float
     high: float
     low: float
@@ -139,9 +142,9 @@ This is the single most important gotcha in the integration.
 **Degenerate path** (`Analyzer._empty`) — **3 keys only**:
 
 ```python
-decision={
+decision = {
     "action": "NO_TRADE",
-    "reason": reason,          # NO_BARS | NEGATIVE_LAST_CLOSED | ATR_UNAVAILABLE
+    "reason": reason,  # NO_BARS | NEGATIVE_LAST_CLOSED | ATR_UNAVAILABLE
     "note": "No analysis was run; see market_state.reason.",
 }
 ```
@@ -153,16 +156,29 @@ own serialiser does exactly this.
 
 ```python
 {
-    "subject": str, "direction": int,
-    "entry": float, "stop": float, "target": float,
-    "entry_basis": str, "stop_basis": str, "target_basis": str,
-    "entry_reference": float, "stop_reference": float, "target_reference": float,
-    "bar_index": int, "signal_bar": int,
-    "risk": float, "reward": float,
-    "reward_to_risk": float, "risk_to_reward": float,
-    "is_valid": bool, "has_structural_stop": bool,
+    "subject": str,
+    "direction": int,
+    "entry": float,
+    "stop": float,
+    "target": float,
+    "entry_basis": str,
+    "stop_basis": str,
+    "target_basis": str,
+    "entry_reference": float,
+    "stop_reference": float,
+    "target_reference": float,
+    "bar_index": int,
+    "signal_bar": int,
+    "risk": float,
+    "reward": float,
+    "reward_to_risk": float,
+    "risk_to_reward": float,
+    "is_valid": bool,
+    "has_structural_stop": bool,
     "invalidation": str,
-    "management": list[str], "issues": list[str], "warnings": list[str],
+    "management": list[str],
+    "issues": list[str],
+    "warnings": list[str],
     "evidence_score": float | None,
     "is_recommendation": False,
 }
@@ -341,14 +357,28 @@ reason the suite imports.
 
 ```python
 from auto_trade.domain.models import (
-    AccountSnapshot, AuditEvent, ExecutionPolicy, ExecutionResult, OrderRequest,
-    RiskLimits, TerminalProfile, TradeSignal, VerificationEvidence,
+    AccountSnapshot,
+    AuditEvent,
+    ExecutionPolicy,
+    ExecutionResult,
+    OrderRequest,
+    RiskLimits,
+    TerminalProfile,
+    TradeSignal,
+    VerificationEvidence,
 )
 from auto_trade.domain.enums import ExecutionStatus, ExecutionState, OrderAction, AccountType
 from auto_trade.domain.exceptions import (
-    AutoTradeError, AutomationError, AutomationRejectedError,
-    AutomationTimeoutError, ExecutionUnknownError, InvalidSignalError,
-    NoSignalAvailable, SafetyViolation, SignalSourceError, TerminalNotFoundError,
+    AutoTradeError,
+    AutomationError,
+    AutomationRejectedError,
+    AutomationTimeoutError,
+    ExecutionUnknownError,
+    InvalidSignalError,
+    NoSignalAvailable,
+    SafetyViolation,
+    SignalSourceError,
+    TerminalNotFoundError,
     PositionSnapshotUnavailable,
 )
 from auto_trade.domain.protocols import KillSwitch, TradingTerminalAdapter
@@ -470,7 +500,7 @@ class ExecutionResult:
         status: ExecutionStatus,
         state: str,
         message: str,
-        order_reference: str | None = None,   # the POSITION ticket
+        order_reference: str | None = None,  # the POSITION ticket
         error: str | None = None,
         evidence: VerificationEvidence | None = None,
     ) -> None: ...
@@ -546,6 +576,7 @@ class ExecutionLedger(Protocol):
     def record_attempt(self, signal_id: str, execution_id: str) -> None: ...
     def record_result(self, result: ExecutionResult) -> None: ...
     def records(self) -> tuple[dict[str, Any], ...]: ...
+
 
 class JsonExecutionLedger:
     def __init__(self, path: Path) -> None: ...
