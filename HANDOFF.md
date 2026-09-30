@@ -210,26 +210,42 @@ reason again.
 
 ---
 
-## The Foundation, Phases 1 and 2
+## The Foundation, Phases 1 to 3
 
 ### Layout
 
 ```
 src/signal_to_trade_bridge/
-  domain/          models.py  enums.py  errors.py     no external deps at all
+  domain/          models.py     eleven value objects
+                   enums.py      six enums, 39 rejection codes
+                   errors.py     two roots, twelve exceptions
+                   resolution.py Resolution[T]           Phase 3
+                   stops.py      resolve_stop()          Phase 3
+                   take_profit.py resolve_take_profit()  Phase 3
+                   validation.py four validation layers  Phase 3
+                   no external deps at all -- enforced by test_domain_isolation
   ports/           __init__.py                        seven Protocols
   application/     __init__.py                        empty; ProcessSignal is Phase 6
-  adapters/        albrooks/  auto-trade/  mt5/  fake/   albrooks done; rest Phase 7
+  adapters/        albrooks/                          Phase 2, complete
+                   auto-trade/  mt5/  fake/           Phase 4 fakes, Phase 7 real
   infrastructure/  logging/                           structured.py  events.py
   configuration/   config.py                          BridgeConfig  config_from_env
   cli/             __init__.py                        empty; CLI is Phase 8
   py.typed
 tests/
   conftest.py                                      fixtures, PROJECT_ROOT
-  unit/            test_domain_isolation.py  test_domain_models.py
-                   test_configuration.py     test_logging.py
+  stubs.py                                         shaped like the engine's output
+  unit/            test_albrooks_mapper.py    test_stop_resolution.py
+                   test_take_profit_policy.py test_validation.py
+                   test_domain_models.py       test_resolution.py
+                   test_configuration.py      test_albrooks_source.py
+                   test_ports.py              test_signal_identity.py
+                   test_logging.py            test_defensive_guards.py
+                   test_domain_isolation.py
+  integration/     test_albrooks_real.py            real Analyzer, opt-in
 docs/              architecture.md  integration.md  setup.md
-scripts/           setup.ps1  setup.sh  test.ps1
+                   signal-flow.md  risk-management.md
+scripts/           setup.ps1  setup.sh  test.ps1  test.sh
 ```
 
 ### Domain layer
@@ -245,11 +261,19 @@ Errors: two roots, `ConfigurationError` and `TradingError`, with twelve
 subclasses. The split is deliberate — a configuration error should stop the
 process, a refused trade should be logged and the next signal processed.
 
+Phase 3 added the **policies** over those values: `Resolution`, the stop
+resolver, the take-profit resolver, and four validation layers. All four files are
+at 100% statement coverage.
+
 ### Ports
 
-Six `Protocol`s: `SignalSource`, `MarketDataProvider`, `AccountProvider`,
+**Seven** `Protocol`s: `SignalSource`, `MarketDataProvider`, `AccountProvider`,
 `SymbolSpecProvider`, `TradeExecutor`, `IdempotencyStore`, `KillSwitch`. Narrow
 on purpose, because a test has to fake them.
+
+`AccountProvider` and `SymbolSpecProvider` have **no implementation yet** — they
+are Phase 4's dependency, and the reason position sizing cannot be written
+without either fakes or the real MT5 adapter.
 
 ### Configuration
 
@@ -262,9 +286,12 @@ the safe ones: `execution_enabled=False`, `dry_run=True`, `risk_percent=0.5`,
 `Event` enum with 12 event names, `StructuredLogger`, JSON and text formatters,
 and substring-based redaction of 13 sensitive key markers.
 
-Three of those events are now emitted: `SIGNAL_RECEIVED`,
-`SIGNAL_REJECTED`, `SIGNAL_SOURCE_UNAVAILABLE`. The other nine are defined and
-reserved for the phase that introduces them.
+**Three of the twelve events are emitted so far**: `SIGNAL_RECEIVED`,
+`SIGNAL_REJECTED`, `SIGNAL_SOURCE_UNAVAILABLE`. The other nine — `STOP_RESOLVED`,
+`TAKE_PROFIT_RESOLVED`, `RISK_CALCULATED`, `POSITION_SIZED`, `TRADE_VALIDATED`,
+`TRADE_REJECTED`, `DRY_RUN_COMPLETED`, `EXECUTION_RESULT`, `DUPLICATE_SUPPRESSED`
+— are defined and reserved, and each is emitted by the phase that introduces it.
+A test asserts the vocabulary is complete, so an event cannot be quietly dropped.
 
 ---
 
@@ -314,18 +341,20 @@ than in an assumption.
 
 ## Current Architecture
 
-Proposed in Phase 0, scaffolded in Phase 1. Full rationale in
-`docs/architecture.md §5`.
+Proposed in Phase 0, scaffolded in Phase 1, first adapter in Phase 2, policies in
+Phase 3. Full rationale in `docs/architecture.md §5`.
 
 ```
 interfaces/     CLI, wiring, composition root          (Phase 8)
 application/    ProcessSignal — the single use case    (Phase 6)
-domain/         Signal, TradeIntent, RiskParameters, PositionSize, TradeDecision,
-                SymbolSpec, AccountBalance, and the pure calculations   (Phases 1, 3, 4)
+domain/         value objects (Phase 1) + policies: stops, take_profit,
+                validation, resolution (Phase 3); sizing and risk (Phase 4)
 ports/          Protocols: SignalSource, MarketDataProvider, AccountProvider,
-                SymbolSpecProvider, TradeExecutor, IdempotencyStore  (Phase 1)
+                SymbolSpecProvider, TradeExecutor, IdempotencyStore, KillSwitch
 adapters/       albrooks/  auto-trade/  mt5/  fake/
-                albrooks → Phase 2   auto-trade + mt5 → Phase 7   fake → Phase 7
+                albrooks → Phase 2, COMPLETE
+                fake → Phase 4 (unblocks the sizer's tests)
+                mt5 + auto-trade → Phase 7
 ```
 
 Dependency direction is strictly inward. `domain` imports nothing from any other
@@ -368,8 +397,35 @@ Decisions made in Phase 1:
 - **Configuration fails loudly.** An unparsable value raises rather than falling
   back to a default, because a risk percentage that quietly reverted to 0.5
   because of a typo would leave a system trading at a level nobody chose.
-- **The evidence threshold is named `minimum_evidence_score`, not
-  `minimum_signal_confidence`.** See the audit's fifth finding.
+- **The evidence threshold is named `minimum_evidence_score`, not the brief's
+  `minimum_signal_confidence`.** The upstream engine states in three places that
+  its evidence score is not a probability of continuation, and a configuration
+  key called "confidence" invites exactly the misreading the number cannot
+  support. This is a *naming* consequence of the audit's first finding, not of the
+  fifth — the fifth is about stop provenance.
+- **Redaction is substring-based and broad.** A key merely *containing* `token` is
+  redacted. The cost of redacting a harmless field is a slightly less informative
+  log line; the cost of missing one is a leaked credential in a file that
+  eventually gets pasted into a bug report.
+
+Decisions made in Phase 3 — the ones that shaped the most code:
+
+- **Failures are `Resolution` values, not exceptions.** A missing stop is the
+  commonest outcome in the system; an exception would force every caller into a
+  `try` block to handle the normal case.
+- **Success on a `Resolution` is an explicit flag, not `value is not None`.** A
+  take-profit step can legitimately succeed with the answer "there is no take
+  profit", and inferring success from the value made that indistinguishable from a
+  refusal.
+- **`Resolution.details` is read-only.** A decision record that could be edited
+  after the fact would not be a record.
+- **The structural-basis vocabularies live in the domain, not the adapter.**
+  Deciding what counts as a defensible stop is a trading policy, and a policy in
+  an adapter would change whenever someone edited a mapping.
+- **Geometry re-checks the stop side even though the stop resolver already did.**
+  Deliberate duplication: the two have different callers, and a check that trusts
+  its input to have been verified elsewhere fails the first time somebody calls it
+  directly.
 - **Redaction is substring-based and broad.** A key merely *containing* `token` is
   redacted. The cost of redacting a harmless field is a slightly less informative
   log line; the cost of missing one is a leaked credential in a file that
@@ -388,12 +444,23 @@ likely to re-litigate by accident.
 | Build a separate MT5 data adapter | `auto-trade` cannot read account or symbol data; `albrooks` has the injectable `MT5Feed` pattern to copy. |
 | Reuse `JsonExecutionLedger`; do not build a second store | Already durable, atomic and cross-process. A second store is a second source of truth. |
 | Refuse an `ATR_FALLBACK` stop by default | The engine calls it "structurally empty"; the brief forbids inventing a stop to make the system trade. |
+| Refuse an *unrecognised* stop basis too, even when fallbacks are allowed | The flag names one specific alternative, not a general licence. The two refusals have different remedies, so their messages say so. |
 | `Decimal` in the domain | Float drift in position sizing is a monetary error. |
 | Both `WAIT` and `NO_TRADE` map to the bridge's no-trade, but the distinction is preserved | They are different upstream claims: an abstention versus a condition not met. Losing that loses traceability. |
 | Read the decision dict with `.get()` everywhere | The degenerate path returns a 3-key dict, not the normal 13-key one. Strict access would raise on exactly the input that most needs a clean refusal. |
 | Editable local path dependencies, not git or submodule | Offline, exact, and identical on every machine. See `docs/architecture.md §7`. |
 | Bridge dry run short-circuits before the executor | Guarantees downstream configuration cannot cause an order during simulation. |
 | The domain test suite requires neither upstream installed | Enforced by asserting the domain package's import closure. Makes the suite runnable on a laptop with no upstreams cloned. |
+| Failures are values, not exceptions | A missing stop is the commonest outcome in the system, not an exceptional condition. |
+| `Resolution` success is an explicit flag | `TakeProfitSource.NONE` legitimately resolves to "no take profit"; inferring success from the value made that look like a refusal. |
+| `Resolution.details` is read-only | A decision record that could be edited after the fact would not be a record. |
+| A missing and a zero stop share one reason code | The engine uses `0.0` to mean "no stop", so they are one fault. Two codes would make an alert fire twice. |
+| A level at the entry is a distance problem, not a side problem | Reported as "wrong side" it would point an operator at a sign error that is not there. |
+| A missing evidence score fails the filter | If an absent value passed, any source omitting the field would bypass the filter. |
+| The *achieved* ratio is reported, not the configured one | Under `RR_FALLBACK` a usable signal target produces the signal's ratio. Reporting the configured one would be reporting an intention as a fact. |
+| Policy vocabularies live in the domain, not the adapter | Deciding what counts as a defensible stop is a trading policy, and a policy in an adapter changes whenever someone edits a mapping. |
+| Geometry duplicates the stop-side check | Different callers, and geometry can come from configuration. A redundant check costs a comparison; a missing one costs a rejected broker order. |
+| Fakes come in Phase 4, before the real MT5 adapter | Unblocks the sizer's tests immediately, and lets the real adapter be written in Phase 7 against tests that already pin the contract. |
 
 ---
 
@@ -516,12 +583,6 @@ Writing these before the code they test exists would be theatre:
 
 * position-sizing tests — Phase 4
 * the end-to-end pipeline — Phase 6
-* idempotency tests — Phase 9
-* end-to-end tests — Phase 10
-* live MT5 tests — Phase 11, and only behind an explicit opt-in marker
-
-* position-sizing tests — Phase 4
-* signal adapter tests — Phase 2
 * idempotency tests — Phase 9
 * end-to-end tests — Phase 10
 * live MT5 tests — Phase 11, and only behind an explicit opt-in marker
@@ -848,6 +909,34 @@ afterwards and matches the local head exactly.
   are excluded and the bar is the unit of identity. Reasoning and the accepted
   trade-off are recorded above, and Phase 9 must revisit it against real engine
   output.
+
+- **Phase 3** — gave the domain its policies. `domain/resolution.py` (one
+  `Resolution[T]` for every two-outcome step), `domain/stops.py` (the stop
+  policy, with the no-invented-stop rule enforced by an AST test),
+  `domain/take_profit.py` (four policies, a fallback never silent), and
+  `domain/validation.py` (four validation layers). Moved the structural-basis
+  vocabularies out of the adapter and into the domain, because deciding what
+  counts as a defensible stop is a trading policy. Added
+  `docs/risk-management.md`. 432 tests, 94% coverage, the four new files at 100%.
+
+  Three bugs found and fixed:
+  - A missing stop escaped as a `ValueError` instead of a reason code.
+    `resolve_stop` passed a zero price straight to `StopLoss`, whose own
+    validation raises — so the commonest outcome in the system arrived as an
+    exception, and a trading loop that did not catch it would crash on a quiet
+    market.
+  - `Resolution` could not express "succeeded with no value". Found by the
+    `TakeProfitSource.NONE` tests, the only policy that resolves to nothing.
+  - A wrong-side stop discarded its computed distance on the way out, because the
+    distance was calculated after the side check — and the distance is the first
+    thing anyone looks at when asking why a stop was rejected.
+
+  Two tests were wrong rather than the code, both for the same reason: an
+  assertion written against a value Python silently rounds. One expected five
+  distinct refusal codes and got four, because a missing stop and a zero stop are
+  the same fault by design. The other compared a `Decimal` distance as a string,
+  but `str(Decimal)` switches to exponent notation below `1e-6` — `1E-11`, not
+  `0.00000000001`.
 
 ---
 
