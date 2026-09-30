@@ -146,11 +146,13 @@ Reason codes are stable strings: `DECISION_DISABLED`, `NO_ANALYSIS`,
 `Analyzer._empty()` builds a decision with **only three keys**:
 
 ```python
-decision={
-    "action": "NO_TRADE",
-    "reason": reason,
-    "note": "No analysis was run; see market_state.reason.",
-},
+decision = (
+    {
+        "action": "NO_TRADE",
+        "reason": reason,
+        "note": "No analysis was run; see market_state.reason.",
+    },
+)
 ```
 
 where `reason` is `NO_BARS`, `NEGATIVE_LAST_CLOSED` or `ATR_UNAVAILABLE`. So the
@@ -166,7 +168,7 @@ geometry fields:
 
 ```python
 subject: str
-direction: int = 0          # +1 long, -1 short, 0 none
+direction: int = 0  # +1 long, -1 short, 0 none
 entry: float = 0.0
 stop: float = 0.0
 target: float = 0.0
@@ -546,6 +548,7 @@ class ExecutionLedger(Protocol):
     def record_result(self, result: ExecutionResult) -> None: ...
     def records(self) -> tuple[dict[str, Any], ...]: ...
 
+
 class JsonExecutionLedger:
     def __init__(self, path: Path) -> None: ...
     def contains(self, signal_id: str) -> bool: ...
@@ -560,11 +563,13 @@ class JsonExecutionLedger:
 (writes to `.tmp` then `replace`). `ExecutionWorkflow` consults it:
 
 ```python
-seen_signal_ids=(
-    {signal.signal_id}
-    if self.ledger is not None and self.ledger.contains(signal.signal_id)
-    else self.seen_signal_ids
-),
+seen_signal_ids = (
+    (
+        {signal.signal_id}
+        if self.ledger is not None and self.ledger.contains(signal.signal_id)
+        else self.seen_signal_ids
+    ),
+)
 ```
 
 so a re-delivered `signal_id` is rejected by `RiskEngine` with
@@ -670,10 +675,15 @@ defaults to `None`, and the real adapter never populates
 machine**:
 
 ```python
-terminal_path = Path(os.getenv("AUTO_TRADE_TERMINAL_PATH",
-    r"C:\Program Files\Alpari MT5_2\terminal64.exe"))
-data_path = Path(os.getenv("AUTO_TRADE_DATA_PATH",
-    r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\AF19ECCF568F855DF9D3196BBF8BF315"))
+terminal_path = Path(
+    os.getenv("AUTO_TRADE_TERMINAL_PATH", r"C:\Program Files\Alpari MT5_2\terminal64.exe")
+)
+data_path = Path(
+    os.getenv(
+        "AUTO_TRADE_DATA_PATH",
+        r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\AF19ECCF568F855DF9D3196BBF8BF315",
+    )
+)
 ```
 
 The bridge must never read or require these, and must not copy this defaulting
@@ -911,19 +921,24 @@ imported by a test of the domain layer.
 class SignalSource(Protocol):
     def latest_signal(self, symbol: str, timeframe: str) -> Signal | None: ...
 
+
 class MarketDataProvider(Protocol):
     def closed_bars(self, symbol: str, timeframe: str, count: int) -> BarSeries: ...
+
 
 class AccountProvider(Protocol):
     def balance(self) -> Decimal: ...
     def equity(self) -> Decimal: ...
     def currency(self) -> str: ...
 
+
 class SymbolSpecProvider(Protocol):
     def spec(self, symbol: str) -> SymbolSpec: ...
 
+
 class TradeExecutor(Protocol):
     def submit(self, request: ExecutionRequest) -> ExecutionResult: ...
+
 
 class IdempotencyStore(Protocol):
     def contains(self, key: str) -> bool: ...
