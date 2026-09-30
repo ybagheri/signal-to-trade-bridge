@@ -23,6 +23,7 @@ from signal_to_trade_bridge.domain.models import (
     ExecutionRequest,
     ExecutionResult,
     PositionSize,
+    RiskBudget,
     RiskParameters,
     Signal,
     StopLoss,
@@ -131,9 +132,15 @@ class TestSymbolSpec:
             )
 
     def test_conservative_tick_value_is_the_worse_of_the_two(self, forex_spec: SymbolSpec) -> None:
-        # A size that is safe on paper has to be safe on the losing side. Using
-        # the profit value on an instrument whose loss value is larger would size
-        # the position for a loss it cannot cover.
+        # `volume = risk_amount / (ticks * tick_value)`, so the *smaller* tick
+        # value gives the *larger* position. A risk calculation must divide by the
+        # larger value, or it sizes for the cheapest possible tick.
+        #
+        # Corrected in Phase 4: this asserted `2.0` (the minimum) on the reasoning
+        # that "a size that is safe on paper has to be safe on the losing side".
+        # The conclusion was right and the implementation was its mirror image --
+        # dividing by $2 when a stop could cost $3 a tick under-sizes the position
+        # by a third, which is the opposite of safe.
         asymmetric = SymbolSpec(
             symbol="SOME_CFD",
             contract_size=forex_spec.contract_size,
@@ -146,9 +153,14 @@ class TestSymbolSpec:
             digits=5,
             point=forex_spec.point,
         )
-        assert asymmetric.conservative_tick_value == Decimal("2.0")
+        assert asymmetric.conservative_tick_value == Decimal("3.0")
 
-    def test_conservative_tick_value_prefers_the_loss_side(self, forex_spec: SymbolSpec) -> None:
+    def test_conservative_tick_value_never_divides_by_the_cheaper_tick(
+        self, forex_spec: SymbolSpec
+    ) -> None:
+        # The same property from the other direction: whichever way the two values
+        # are ordered, the one used is the larger, because a larger divisor is a
+        # smaller position and an under-sized position is the safe failure.
         asymmetric = SymbolSpec(
             symbol="SOME_CFD",
             contract_size=forex_spec.contract_size,
@@ -161,7 +173,27 @@ class TestSymbolSpec:
             digits=5,
             point=forex_spec.point,
         )
-        assert asymmetric.conservative_tick_value == Decimal("2.0")
+        assert asymmetric.conservative_tick_value == Decimal("3.0")
+
+    def test_a_zero_tick_value_does_not_zero_the_conservative_one(
+        self, forex_spec: SymbolSpec
+    ) -> None:
+        # Some symbols report one of the two as zero rather than omitting it.
+        # Taking a plain `min` of those would give zero and refuse every trade on
+        # a perfectly tradable instrument; `max` handles it without a special case.
+        one_sided = SymbolSpec(
+            symbol="SOME_CFD",
+            contract_size=forex_spec.contract_size,
+            tick_size=forex_spec.tick_size,
+            tick_value_profit=Decimal("1.0"),
+            tick_value_loss=Decimal("0"),
+            volume_min=forex_spec.volume_min,
+            volume_max=forex_spec.volume_max,
+            volume_step=forex_spec.volume_step,
+            digits=5,
+            point=forex_spec.point,
+        )
+        assert one_sided.conservative_tick_value == Decimal("1.0")
 
     def test_risk_per_unit_is_tick_value_based(self, forex_spec: SymbolSpec) -> None:
         # 0.00300 / 0.00001 = 300 ticks, at $1 per tick per lot = $300.
@@ -315,6 +347,62 @@ class TestRiskParameters:
     def test_reward_amount_scales_with_the_ratio(self) -> None:
         risk = RiskParameters(risk_percent=Decimal("0.5"), reward_risk_ratio=Decimal("2"))
         assert risk.reward_amount(Decimal("10000")) == Decimal("100")
+
+
+class TestRiskBudget:
+    def _budget(self, **overrides: object) -> RiskBudget:
+        defaults: dict[str, object] = {
+            "amount": Decimal("50"),
+            "balance": Decimal("10000"),
+            "risk_percent": Decimal("0.5"),
+            "currency": "USD",
+            "reward_amount": Decimal("50"),
+            "reward_risk_ratio": Decimal("1.0"),
+        }
+        defaults.update(overrides)
+        return RiskBudget(**defaults)  # type: ignore[arg-type]
+
+    def test_keeps_every_input_the_amount_was_derived_from(self) -> None:
+        # A budget on its own is an assertion rather than a record. These are the
+        # numbers a reviewer re-derives by hand, so they travel with it.
+        budget = self._budget()
+        assert budget.balance == Decimal("10000")
+        assert budget.risk_percent == Decimal("0.5")
+        assert budget.reward_risk_ratio == Decimal("1.0")
+
+    def test_the_fraction_of_the_balance_is_the_configured_fraction(self) -> None:
+        assert self._budget().fraction_of_balance == Decimal("0.005")
+
+    def test_serialises_every_field(self) -> None:
+        assert self._budget().to_dict() == {
+            "amount": "50",
+            "balance": "10000",
+            "risk_percent": "0.5",
+            "currency": "USD",
+            "reward_amount": "50",
+            "reward_risk_ratio": "1.0",
+        }
+
+    @pytest.mark.parametrize(
+        "field", ["amount", "balance", "risk_percent", "reward_amount", "reward_risk_ratio"]
+    )
+    @pytest.mark.parametrize("bad", [Decimal("0"), Decimal("-1")])
+    def test_refuses_a_non_positive_money_field(self, field: str, bad: Decimal) -> None:
+        # A budget of zero is not a small budget, it is an undefined one, and a
+        # later division by it produces a nonsense volume rather than a refusal.
+        with pytest.raises(ValueError):
+            self._budget(**{field: bad})
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_refuses_a_blank_currency(self, blank: str) -> None:
+        # The currency is what makes the tick value divisible by the budget, so an
+        # absent one has to be caught where the budget is built.
+        with pytest.raises(ValueError, match="currency is required"):
+            self._budget(currency=blank)
+
+    def test_is_frozen(self) -> None:
+        with pytest.raises(AttributeError):
+            self._budget().amount = Decimal("999")  # type: ignore[misc]
 
 
 class TestPositionSize:

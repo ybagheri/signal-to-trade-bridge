@@ -2,17 +2,19 @@
 
 How a reading becomes a sized trade, and where it stops.
 
-Phase 3 covers the policies that work on values already in hand: the stop, the
-take profit, and the geometry checks. **Position sizing is Phase 4** and needs
-the account balance and the symbol specification, which come from the terminal.
+**Phase 4 completes the sizing pipeline.** Steps 1–6 were Phase 3's policies over
+values already in hand; steps 7 and 8 — the risk amount and the position size —
+are here. What remains unimplemented is everything *after* the size: the decision
+pipeline that wires these together with a signal (Phase 6) and the MT5 adapter
+that supplies the account and symbol facts in production (Phase 7).
 
-This document describes the implemented policies and names the Phase 4 boundary
-explicitly, because the two are easy to confuse and the confusion would lead
-someone to write a sizer that invents its own account data.
+The bridge can now size a trade. It cannot yet decide to place one, because
+nothing connects a signal to this sizing — that is the next phase, and it is a
+deliberate order rather than an oversight.
 
 ---
 
-## The pipeline so far
+## The pipeline
 
 ```
 Signal (from the adapter)
@@ -28,16 +30,18 @@ Signal (from the adapter)
 [5] validate_policy        may *this bridge* act on it, under its own rules?
     ↓
 [6] validate_against_spec  can the symbol express these prices at all?
+══════════ Phase 4: everything below needs the account and the symbol ══════════
+[7] resolve_risk_budget    balance × configured percentage
     ↓
-──────── Phase 4 begins here: everything below needs the account and the symbol ────────
-    ↓
-[7] risk amount            balance × configured percentage
-    ↓
-[8] position size          ticks × tick value, rounded to the broker's step
+[8] resolve_position_size  ticks × tick value, rounded to the broker's step
+═════════════════════ Phase 6 begins here: ProcessSignal ══════════════════════
+    [9] idempotency, dry run, execution
 ```
 
-Every step returns a `Resolution`: either a value or a reason code. Steps 1–6
-are implemented. Step 7 is not.
+Every step returns a `Resolution`: either a value or a reason code. **All eight are
+implemented.** Steps 1–6 are pure functions of their arguments; steps 7 and 8 are
+too, but they need facts that exist only in a terminal, so `application/risk_service.py`
+obtains them through the ports and hands them over.
 
 ---
 
@@ -202,6 +206,224 @@ specification, so it belongs with the market-data provider in Phase 7.
 
 ---
 
+## Step 7 — the risk amount
+
+```
+risk_amount = balance × risk_percent / 100
+```
+
+Balance, never equity. Equity moves with open positions, so sizing on it would
+make the risk of a new trade depend on trades already running.
+
+The result is a `RiskBudget`, not a bare number. A budget on its own is an
+assertion; "0.5% of a $10,000 balance, targeting $50" can be recomputed by hand,
+and that recomputation is the only thing standing between a mistyped percentage
+and a system trading at a risk level nobody chose.
+
+### There is no code path that invents an account balance
+
+The same rule `stops.py` applies to a stop, one level up. If the balance is
+unavailable, the answer is a refusal — not a remembered figure, not a configured
+default, not the last value that was seen. A position sized against an invented
+balance is arithmetically correct and financially meaningless, and it is
+arithmetically correct in a way that is very hard to notice afterwards.
+
+Enforced by an AST test that walks `risk.py` and asserts three things: no numeric
+literal in the module could serve as a balance, the module never constructs an
+`AccountBalance` (it *reads* the one it is given), and the budget's amount comes
+from `RiskParameters.risk_amount` rather than from a second implementation of the
+percentage calculation that could later disagree with the first.
+
+### Currency coherence is checked before any division
+
+MT5 quotes `tick_value_profit` in the **account** currency for one lot. A
+position size divides the budget by `ticks × tick_value`, and that division is
+only meaningful when both sides are the same money. Dividing dollars by euros
+produces a number that looks exactly like a volume and is not one.
+
+So `check_currency_compatibility` runs before the sizing, and refuses when:
+
+| Case | Reason code | Why |
+|---|---|---|
+| `currency_profit` is not stated | `SYMBOL_SPEC_UNAVAILABLE` | A check that passes on missing data is not a check. The MT5 adapter populates this field, so an empty one means the adapter did not run. |
+| `currency_profit` ≠ account currency | `INVALID_RISK_PARAMETERS` | The division would be across two currencies. |
+
+**The margin currency is recorded but not refused.** EURUSD margin is quoted in
+EUR on a USD account. That is normal, and refusing it would refuse every forex
+pair on a dollar account.
+
+---
+
+## Step 8 — the position size
+
+```
+ticks         = |entry − stop| / tick_size
+risk_per_unit = ticks × conservative_tick_value
+raw_volume    = risk_amount / risk_per_unit
+volume        = round_down_to_step(raw_volume)  then clamp to [min, max]
+```
+
+### Why tick-value based rather than a pip formula
+
+Because it needs no special cases. A 5-digit EURUSD and a 2-decimal XAUUSD both
+reach **$300 per lot** over their natural stop, by completely different
+arithmetic:
+
+```
+EURUSD   0.00300 / 0.00001 × $1 = 300 ticks × $1 = $300 a lot
+XAUUSD   3.00    / 0.01    × $1 = 300 ticks × $1 = $300 a lot
+```
+
+A sizer that assumed a 5-digit pair and a 100000 contract size would be wrong on
+gold by two orders of magnitude, and wrong in the direction of **oversizing**.
+Both cases are in the test suite deliberately, because the pair of them is what
+distinguishes a tick-value sizer from a forex sizer that happens to work.
+
+Note what is *absent* from the formula: `contract_size`. It is already folded
+into the tick value, which is quoted per lot. A sizer that multiplied by it as
+well would double-count on every instrument, and by 100000 on a forex pair. There
+is a test for exactly that.
+
+### The conservative tick value is the larger of the two
+
+This is the one place Phase 4 changed a Phase 1 decision, and the correction is
+worth reading twice because the original was not a typo — it was the right
+conclusion reached by inverting the arithmetic.
+
+`volume = risk_amount / (ticks × tick_value)`, so **volume is inversely
+proportional to the tick value**. The *smaller* tick value therefore produces the
+*larger* position. Taking the minimum of `tick_value_profit` and
+`tick_value_loss` is the **least conservative choice available**.
+
+`tick_value_profit` and `tick_value_loss` differ on a hedging account and on some
+CFDs. On a symbol reporting $1 a tick in profit and $2 in loss, a $50 budget over
+a 300-tick stop came out at **0.16 lots** — and if that stop were hit, the loss
+would be `300 × $2 × 0.16 = $96`, twice the budget. The arithmetic downstream was
+correct throughout; the divisor was wrong.
+
+`conservative_tick_value` is now `max(...)`, which bounds the loss from above in
+both directions: a long whose stop is hit on a falling price and a short whose
+stop is hit on a rising one are both covered. It can under-size a position whose
+real tick value happens to be the smaller of the two, and that is the correct
+direction to err — an under-spent budget is a disappointment, an over-spent one is
+a loss.
+
+The exact per-direction value is knowable (`tick_value_loss` for a long,
+`tick_value_profit` for a short) and would size both sides optimally. It is not
+used: it would make the size depend on the direction, which means two more code
+paths, two more combinations to test, and a way for a long to be sized with a
+short's number. One bound that is safe for both is worth more here than the
+tightness it gives up.
+
+A side effect of `max`: a symbol reporting `0` for one of the two values no longer
+produces a zero conservative value, so the ordinary case needs no special
+handling. Only a symbol with **both** sides at zero is refused, and that is
+correct — it is an unfinished symbol, not a cheap one.
+
+### A volume below the broker minimum is a refusal, never a floor-up
+
+```
+budget $0.20, stop 300 ticks  →  raw 0.00066  →  rounds down to 0.00  →  minimum is 0.01
+```
+
+Refused, as `VOLUME_BELOW_BROKER_MINIMUM`. Flooring up to `volume_min` would
+place a position risking `$3` against a `$0.20` budget — fifteen times the money
+anybody chose to risk, decided by the broker rather than by the trader. It is the
+single most dangerous line in any position sizer, and it is guarded three times
+over:
+
+1. `SymbolSpec.clamp_volume` clamps a sub-minimum volume **down to zero**, so the
+   caller cannot pass one through by accident.
+2. `PositionSize.__post_init__` **raises** if `clamped_to_minimum` is ever set, so
+   no code path can construct a size that records a floor-up.
+3. `resolve_position_size` refuses rather than clamping.
+
+The refusal names three real remedies — raise `BRIDGE_RISK_PERCENT`, accept that
+the instrument is too coarse for this account, or wait for a tighter stop — and
+keeps the partial arithmetic (`raw_volume`, `rounded_volume`, `ticks`,
+`risk_amount`) so it can be debugged rather than merely observed.
+
+### Rounding is down, always
+
+Rounding up can exceed the budget; rounding down leaves it fractionally under.
+The sizer's last act is to check that, and to **discard the size** if it fails:
+
+```python
+if not position.is_within_budget:
+    return refused(SIZING_FAILED, ...)
+```
+
+Unreachable through the normal path — rounding down and clamping down both move
+the volume away from the budget — and kept for the day somebody changes the
+rounding direction, which is a one-character edit that would break the central
+invariant silently. There is a test that drives the branch by making the round-up
+happen for real.
+
+### Clamping down to `volume_max` is allowed and is recorded
+
+Unlike a sub-minimum volume, clamping to the maximum is **safe**: it reduces the
+risk. The only requirement is that the log says so, because a position at the
+maximum is not a position at the intended size. `PositionSize.clamped_to_maximum`
+and `planned_loss` both exist for that — `planned_loss` reports the money actually
+at risk, which after rounding and clamping is almost never the intended amount.
+
+### `PositionSize` keeps every input
+
+A volume alone is not auditable. "0.16 lots" cannot be checked against anything,
+while the balance, percentage, stop distance, ticks, tick size and tick value that
+produced it can be recomputed by hand.
+
+---
+
+## Who obtains the account and symbol facts
+
+`domain` cannot. `test_domain_isolation` walks the package's AST and fails on any
+edge to `ports`, so `resolve_risk_budget` takes an `AccountBalance` as an argument
+rather than asking an `AccountProvider` for one.
+
+`application/risk_service.py` closes that gap, and that is the only reason it
+exists:
+
+```python
+size = RiskService(account_provider, symbol_spec_provider).position_size(symbol, stop, risk)
+```
+
+It converts a provider that raises into a refusal, checks the currencies, and
+emits `RISK_CALCULATED` and `POSITION_SIZED` — **including on refusals**. A size
+refused because the budget is too small for this instrument is one of the most
+useful lines in the whole log: it says the configuration and the market do not fit
+together, and it says it with the numbers. An event emitted only on success would
+leave an operator with a silence indistinguishable from a signal that never
+arrived.
+
+A terminal that is not running is an **expected condition**, so no exception
+escapes: the loop records a refusal and processes the next signal.
+
+### The fakes
+
+`adapters/fake/` holds `FakeAccountProvider` and `FakeSymbolSpecProvider`. They
+are in the package rather than in `tests/` because **a fake implements the same
+port as the real thing** — so a test written against them exercises the path the
+terminal will drive, and they are the specification Phase 7's MT5 adapter will be
+written against.
+
+Both obey the two rules that make the real adapter's hardest cases testable:
+
+- **An unreachable source raises.** It does not return a sentinel, a default or a
+  remembered last-known-good value. "The account has no money" and "we could not
+  ask" are different answers, and collapsing them is how a system ends up sizing
+  trades against a stale balance.
+- **An unknown symbol raises.** It does not return a default specification. A
+  default would be an invented contract, which is precisely what the Phase 0 audit
+  established that neither upstream project has.
+
+The specification builders (`eurusd_spec`, `gold_spec`, `unusual_spec`) exist by
+name so the gold case is a deliberate test rather than an accident. `unusual_spec`
+is deliberately asymmetric — $0.50 a tick in profit against $2.00 in loss — so the
+conservative-value correction is exercised through the whole service.
+
+---
+
 ## The `Resolution` type
 
 Every step returns one:
@@ -215,7 +437,7 @@ stop = resolution.unwrap()
 
 **Failures are values, not exceptions.** A missing stop is the commonest outcome
 in the system, not an exceptional condition, and an exception would force every
-caller into a `try` block to handle the normal case.
+caller into a `try` block to handle the common case.
 
 **Success is an explicit flag, not `value is not None`.** A take-profit step can
 legitimately succeed with the answer "there is no take profit" — that is
@@ -229,26 +451,26 @@ record that could be edited after the fact would not be one.
 
 ---
 
-## What Phase 4 owns, and why it is separate
+## What is still missing, and where
 
-Not implemented yet:
-
-| Step | Needs | Why it is not here |
+| Step | Needs | Status |
 |---|---|---|
-| Risk amount | `AccountBalance` | Neither upstream project knows the balance. `albrooks` has no account layer; `auto-trade` reads nothing numeric from the terminal. |
-| Position size | `SymbolSpec` | `albrooks` treats a symbol as an opaque string. `auto-trade`'s `SymbolInfo` is dead code with three fields. |
-| Broker constraints | `SymbolSpec` | Volume step, min, max. |
-| Margin check | both | Needs live account state. |
-
-Writing a sizer now would mean inventing account data, and inventing account facts
-is the one thing this project refuses to do. The boundary is not conservatism — it
-is that there is nothing to compute from until the MT5 adapter of Phase 7 exists.
+| Risk amount | `AccountBalance` | **Done.** `domain/risk.py` |
+| Position size | `SymbolSpec` | **Done.** `domain/sizing.py` |
+| Broker constraints | `SymbolSpec` | **Done.** `check_broker_constraints` |
+| The account and spec in production | a terminal | Phase 7. `adapters/mt5/` |
+| A real account/symbol provider in tests | — | **Done.** `adapters/fake/` |
+| Wiring signal → stop → size → decision | — | Phase 6. `ProcessSignal` |
+| Margin check | live account state | Not scheduled. Recorded as a known gap: a position can pass every check here and still be refused for margin at the broker. |
 
 ---
 
-## Invariants established in this phase
+## Invariants
 
-1. **No code path invents a stop.** Enforced by an AST test, not by convention.
+Established in Phases 3 and 4:
+
+1. **No code path invents a stop, a balance or a tick value.** Three AST tests, one
+   per module that could plausibly grow such a path.
 2. **A missing stop and a zero stop are one fault with one code**, because the
    engine uses `0.0` to mean "no stop".
 3. **A level at the entry is a distance problem, not a side problem**, for both
@@ -263,3 +485,11 @@ is that there is nothing to compute from until the MT5 adapter of Phase 7 exists
    the way.
 9. **`Resolution.details` is read-only**, so a decision record cannot be rewritten
    after it was made.
+10. **A volume below `volume_min` is a refusal, never a floor-up** — guarded three
+    times over, one of which raises at construction.
+11. **Rounding to `volume_step` is down**, and a size that would exceed its budget
+    is discarded rather than returned.
+12. **The conservative tick value is the larger of the two**, because volume is
+    inversely proportional to it and the under-sized position is the safe failure.
+13. **A size cannot be produced without both an account balance and a symbol
+    specification**, and neither is ever defaulted.

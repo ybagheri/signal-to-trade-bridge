@@ -865,8 +865,17 @@ makes this correct for gold, indices, CFDs and futures-like instruments rather
 than only for 5-digit Forex pairs. `tick_value` in MT5 is quoted in the
 **account** currency for a volume of 1 lot, and the bridge normalises profit and
 loss currencies explicitly: if `tick_value_profit` and `tick_value_loss` differ
-(the profit/loss hedging case, and swap-rate-free CFDs), the **worse** of the two
-is used, because a size that is safe on paper must be safe on the losing side.
+(the profit/loss hedging case, and swap-rate-free CFDs), the **larger** of the two
+is used.
+
+*Corrected in Phase 4.* This section originally said the *worse* of the two,
+implemented as `min`, on the reasoning that "a size that is safe on paper must be
+safe on the losing side". The conclusion was right and the implementation was its
+mirror image: `volume` is inversely proportional to `tick_value`, so the *smaller*
+tick value gives the *larger* position, and taking the minimum is the least
+conservative choice available. On a hedging symbol at $1 a tick in profit and $2
+in loss, a $50 budget over a 300-tick stop came out at 0.16 lots and would have
+lost $96. See `docs/risk-management.md` §"Step 8" for the full arithmetic.
 
 Rounding is **down** to `volume_step`. Rounding up could exceed the risk budget;
 rounding down leaves it slightly under, which is the safe direction. The result
@@ -1055,18 +1064,26 @@ cannot quietly relax one:
 1. **No valid stop ⇒ no trade.** There is no code path that synthesises a stop.
 2. **A volume below `volume_min` is a refusal, never a floor-up.**
 3. **Rounding to `volume_step` is always down.**
-4. **Every rejection carries a stable reason code.** No rejection is expressed
+4. **No code path invents a stop, an account balance or a symbol tick value.**
+   Three AST tests, one per module that could plausibly grow such a path. Each
+   asserts that no numeric literal in the module could serve as a level and that
+   the relevant value is read from an argument rather than constructed.
+5. **The tick value a size is divided by is the larger of `tick_value_profit` and
+   `tick_value_loss`.** Volume is inversely proportional to it, so the smaller
+   value gives the larger position and the under-sized position is the safe
+   failure. (§5.6; corrected in Phase 4.)
+6. **Every rejection carries a stable reason code.** No rejection is expressed
    only as log prose.
-5. **`UNKNOWN` execution is never auto-retried.**
-6. **The bridge's dry run short-circuits before the executor is called**, so
+7. **`UNKNOWN` execution is never auto-retried.**
+8. **The bridge's dry run short-circuits before the executor is called**, so
    `auto-trade` configuration cannot cause an order during a bridge dry run.
-7. **The bridge honours `FileKillSwitch` in its own decision path**, not only
+9. **The bridge honours `FileKillSwitch` in its own decision path**, not only
    inside `auto-trade`.
-8. **The default configuration cannot execute.** `execution_enabled` defaults to
-   false, and turning it on is a separate, explicit, documented act.
-9. **A stop on the wrong side of entry is refused locally**, because the
-   downstream adapter does not check it (§3.5).
-10. **Confidence is never described as a probability** — in code, in config names
+10. **The default configuration cannot execute.** `execution_enabled` defaults to
+    false, and turning it on is a separate, explicit, documented act.
+11. **A stop on the wrong side of entry is refused locally**, because the
+    downstream adapter does not check it (§3.5).
+12. **Confidence is never described as a probability** — in code, in config names
     or in documentation.
 
 ---

@@ -37,6 +37,7 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResult",
     "PositionSize",
+    "RiskBudget",
     "RiskParameters",
     "Signal",
     "StopLoss",
@@ -139,9 +140,11 @@ class SymbolSpec:
     MT5 fields they come from so the mapping is obvious at the adapter boundary.
 
     ``tick_value_profit`` and ``tick_value_loss`` are both present because they
-    can differ. On a hedging account and on some CFDs they do, and the *worse* of
-    the two is what a risk calculation must use: a size that is safe on paper has
-    to be safe on the losing side.
+    can differ. On a hedging account and on some CFDs they do, and the *larger* of
+    the two is what a risk calculation must use: it is an upper bound on the money
+    one tick can cost, so a position sized from it cannot exceed its budget when
+    the stop is hit in either direction. See :attr:`conservative_tick_value` for
+    why this is the maximum rather than the minimum.
     """
 
     symbol: str
@@ -195,24 +198,57 @@ class SymbolSpec:
 
     @property
     def conservative_tick_value(self) -> Decimal:
-        """The worse of the two tick values.
+        """The **larger** of the two tick values, i.e. an upper bound on the loss.
 
-        Deliberately the minimum rather than the profit value. Using the profit
-        value on an instrument whose loss value is larger would size the position
-        for a profit that is smaller than the loss it is being protected against,
-        which understates risk precisely when it matters.
+        Corrected in Phase 4. Phase 1 implemented this as ``min``, on the reasoning
+        that "a size that is safe on paper has to be safe on the losing side".
+        The reasoning was right and the implementation was its mirror image, and
+        it under-sized every position on an instrument where the two values
+        differ.
+
+        Why the larger one is the conservative one, in the arithmetic rather than
+        in adjectives::
+
+            risk_per_unit = ticks * tick_value
+            volume        = risk_amount / risk_per_unit
+
+        ``volume`` is inversely proportional to ``tick_value``, so the *smaller*
+        tick value produces the *larger* position. Taking the minimum therefore
+        sizes for the cheapest possible tick and is the least conservative choice
+        available. On a hedging symbol reporting $1 a tick in profit and $2 a tick
+        in loss, a $50 budget over a 300-tick stop came out at 0.16 lots -- and if
+        that stop were hit, the loss would be ``300 * $2 * 0.16 = $96``, twice the
+        budget. The arithmetic downstream was correct throughout; the divisor was
+        wrong.
+
+        Taking the maximum bounds the loss from above in **both** directions, so a
+        long whose stop is hit on a falling price and a short whose stop is hit on
+        a rising one are both covered. It can under-size a position whose real
+        tick value happens to be the smaller of the two, and that is the correct
+        direction to err: an under-spent budget is a disappointment, an over-spent
+        one is a loss.
+
+        The exact per-direction value is knowable -- ``tick_value_loss`` for a long,
+        ``tick_value_profit`` for a short -- and using it would size both sides
+        optimally. It is not used, because it makes the size depend on the
+        direction, which means two more code paths, two more combinations to test,
+        and a way for a long to be sized with a short's number. A single bound
+        that is safe for both is worth more here than the tightness it gives up.
         """
-        if self.tick_value_loss > 0:
-            return min(self.tick_value_profit, self.tick_value_loss)
-        return self.tick_value_profit
+        return max(self.tick_value_profit, self.tick_value_loss)
 
     def risk_per_unit(self, price_distance: Decimal) -> Decimal:
-        """Money lost per lot over a price move of ``price_distance``.
+        """Money at risk per lot over a price move of ``price_distance``.
 
-        ``price_distance / tick_size`` ticks, times the conservative tick value.
-        This is the quantity that makes sizing instrument-agnostic: it works for
-        a 5-digit forex pair, for gold quoted in dollars per ounce, and for an
-        index CFD, because none of them needs a special case.
+        ``price_distance / tick_size`` ticks, times
+        :attr:`conservative_tick_value`. This is the quantity that makes sizing
+        instrument-agnostic: it works for a 5-digit forex pair, for gold quoted in
+        dollars per ounce, and for an index CFD, because none of them needs a
+        special case.
+
+        An upper bound rather than the exact figure, for the reason
+        :attr:`conservative_tick_value` gives. Callers must therefore treat it as
+        the worst case, not as a prediction.
         """
         if price_distance <= 0:
             return Decimal(0)
@@ -541,6 +577,69 @@ class RiskParameters:
             "allowed_symbols": sorted(self.allowed_symbols),
             "max_spread": str(self.max_spread) if self.max_spread is not None else None,
             "max_open_positions": self.max_open_positions,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RiskBudget:
+    """How much money this trade is allowed to lose, and where that came from.
+
+    A separate type rather than a bare ``Decimal``, because the number on its own
+    is not auditable. "Risk $50" cannot be checked against anything; "0.5% of a
+    $10,000 balance, targeting $50" can be recomputed by hand, and it is that
+    recomputation which is the only thing standing between a misconfigured
+    percentage and a system nobody chose.
+
+    Every field is retained for the same reason :class:`PositionSize` retains
+    every input. A decision record that cannot be re-derived is an assertion
+    rather than a record.
+    """
+
+    #: The maximum planned loss, in the account currency.
+    amount: Decimal
+    #: The balance the amount was taken from. Always the *balance*, never the
+    #: equity -- see :attr:`AccountBalance.effective_balance`.
+    balance: Decimal
+    #: The configured percentage, e.g. ``0.5`` for half a percent.
+    risk_percent: Decimal
+    #: The account currency ``amount`` is denominated in. Carried because a tick
+    #: value in a different currency would make the division meaningless, and
+    #: because the refusal that catches that has to be able to name both.
+    currency: str
+    #: The planned gain at the configured ratio. Recorded rather than recomputed
+    #: later, because the *achieved* ratio can differ from the configured one and
+    #: a log reporting the configured number would report an intention as a fact.
+    reward_amount: Decimal
+    #: The ratio ``reward_amount`` was derived from.
+    reward_risk_ratio: Decimal
+
+    def __post_init__(self) -> None:
+        _positive(self.amount, "risk amount")
+        _positive(self.balance, "balance")
+        _positive(self.risk_percent, "risk_percent")
+        if not self.currency.strip():
+            raise ValueError("currency is required")
+        _positive(self.reward_amount, "reward amount")
+        _positive(self.reward_risk_ratio, "reward_risk_ratio")
+
+    @property
+    def fraction_of_balance(self) -> Decimal:
+        """The amount as a fraction of the balance, i.e. ``risk_percent / 100``.
+
+        Exposed because it is the number a reviewer checks first: a budget that
+        claims to be half a percent of the balance and is not is a configuration
+        error that no other field would reveal.
+        """
+        return self.amount / self.balance
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "amount": str(self.amount),
+            "balance": str(self.balance),
+            "risk_percent": str(self.risk_percent),
+            "currency": self.currency,
+            "reward_amount": str(self.reward_amount),
+            "reward_risk_ratio": str(self.reward_risk_ratio),
         }
 
 
