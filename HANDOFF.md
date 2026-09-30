@@ -12,20 +12,21 @@
 
 ## Current Status
 
-**Phases 0 and 1 complete. Phase 2 not started.**
+**Phases 0, 1 and 2 complete. Phase 3 not started.**
 
-Phase 0 was a repository audit. Phase 1 built the project foundation: packaging,
-the domain layer, the ports, configuration, structured logging, and a 126-test
-suite that runs without MetaTrader 5 and without either upstream project
-installed.
+Phase 0 was a repository audit. Phase 1 built the foundation. Phase 2 built the
+first adapter — the Al Brooks signal source — which is where the anti-corruption
+layer either becomes real or stays notional. It is real, and it is tested against
+both a hand-written stub and the real upstream engine.
 
-No trading code exists yet, and that is correct: the pipeline that reads a signal
-and produces an order is Phases 2 through 8.
+**245 tests passing.** Lint, format, type check and the domain-isolation check all
+clean. The suite runs **without `albrooks` installed**, which is the property that
+makes it a safety net rather than a souvenir.
 
 ```
-Last completed phase: 1
-Current phase:        2 (not started)
-Next phase:           2 — Al Brooks signal adapter
+Last completed phase: 2
+Current phase:        3 (not started)
+Next phase:           3 — internal trading domain (risk and take-profit policy)
 ```
 
 ---
@@ -34,7 +35,7 @@ Next phase:           2 — Al Brooks signal adapter
 
 - [x] **Phase 0** — Repository discovery and architecture audit
 - [x] **Phase 1** — Project foundation
-- [ ] Phase 2 — Al Brooks signal adapter
+- [x] **Phase 2** — Al Brooks signal adapter
 - [ ] Phase 3 — Internal trading domain
 - [ ] Phase 4 — Risk management
 - [ ] Phase 5 — 1:1 risk/reward
@@ -49,16 +50,95 @@ Next phase:           2 — Al Brooks signal adapter
 
 ---
 
-## What Phase 1 Built
+## What Phase 2 Built
+
+```
+adapters/albrooks/
+  identity.py   compute_signal_id()            deterministic, content-derived
+  mapper.py     map_result_to_signal()         the anti-corruption layer itself
+  source.py     AlBrooksSignalSource           implements SignalSource
+  __init__.py   the only names the rest of the project imports
+tests/
+  stubs.py                                     shaped like the real engine's output
+  unit/test_albrooks_mapper.py                 72 tests
+  unit/test_albrooks_source.py                 23 tests
+  unit/test_signal_identity.py                 16 tests
+  unit/test_ports.py                           22 tests
+  integration/test_albrooks_real.py            9 tests, real engine
+docs/signal-flow.md                            what happens, and where it stops
+```
+
+### Design decisions Phase 2 made
+
+These are the ones a later phase is most likely to re-litigate by accident.
+
+- **The prices are excluded from the signal key; the bar is in it.** This is the
+  single most debatable decision in the project, and it is deliberate. A
+  recomputation over the *same* closed bar that nudges a stop by one tick is the
+  same reading with a rounding difference; including the prices would let a
+  flapping stop produce a fresh position every cycle. The trade-off: if the
+  engine materially revises a stop on the same bar, the revision is suppressed as
+  a duplicate. **Phase 9 must revisit this against real engine output.**
+- **The direction comes from the action, never from `decision["direction"]`.**
+  When the two disagree — an upstream bug — the action wins, because it is the
+  coarser and more conservative statement. A long taken from a `SELL` because of a
+  stale direction field is the worst available outcome.
+- **A `0.0` price means "undefined".** The engine's `TradePlan` uses `0.0` for an
+  absent level and its own geometry check *skips* zeros rather than comparing
+  them. Preserving that is the difference between "there is no stop" and "the stop
+  is at zero", and the second would be wrong by the entire size of the instrument.
+- **`Signal.entry` became optional.** Phase 1 made it mandatory, which was wrong:
+  the engine returns `plan: None` on every abstention, so requiring an entry would
+  have forced the adapter to substitute the last close for one. It is now required
+  only for a tradable action, and validated as such.
+- **The stop and target bases are carried but not interpreted.** The adapter is a
+  converter, and a trading policy inside it would be a policy that changed
+  whenever someone edited a mapping. Phase 4 decides what to trust.
+- **`WAIT` and `NO_TRADE` stay distinct end to end.** Different upstream claims,
+  different log lines, different reasons. Collapsing them would make a quiet day
+  unexplainable.
+- **The engine is imported lazily, inside a function.** So importing the bridge
+  works on a machine that has never heard of `albrooks`, and the error names the
+  fix rather than saying "No module named albrooks".
+
+### Bugs Phase 2 found
+
+Four, all fixed. Recorded because each is a failure mode a later phase could
+reintroduce.
+
+1. **`Signal.entry` was mandatory in Phase 1**, which made the commonest outcome in
+   the system — "the engine found nothing to trade" — unmappable. Found by
+   writing the abstention test and watching it return `None` with an empty reason.
+2. **An abstention was being reported as `SIGNAL_DIRECTION_UNKNOWN` instead of
+   being mapped**, because the shared builder required an entry. Split into two
+   construction paths.
+3. **`source_direction` read the numeric field for abstentions.** A stray non-zero
+   `direction` on a `WAIT` would have produced a tradable signal. Now an
+   abstention is `FLAT` unconditionally, and the numeric field is not read at all.
+4. **A missing `action` key was reported as an unknown action.** Different
+   failures: the first means the upstream shape changed, the second means it grew
+   a fifth action. Sending an operator looking for a new enum member instead of at
+   the contract is a wasted debugging session.
+
+One test was also wrong rather than the code, and was corrected: it asserted that
+two float timestamps differing at the 16th digit produce different keys, but
+Python silently rounds `1727740800.0000001` to `1727740800.0`, so the test would
+have passed whether or not the renderer worked. It now asserts the fixture values
+are distinct doubles *before* checking the keys, so it cannot pass for the wrong
+reason again.
+
+---
+
+## The Foundation, Phases 1 and 2
 
 ### Layout
 
 ```
 src/signal_to_trade_bridge/
   domain/          models.py  enums.py  errors.py     no external deps at all
-  ports/           __init__.py                        six Protocols
+  ports/           __init__.py                        seven Protocols
   application/     __init__.py                        empty; ProcessSignal is Phase 6
-  adapters/        albrooks/ auto_trade/ mt5/ fake/   all empty; filled in Phases 2, 7, 7
+  adapters/        albrooks/  auto-trade/  mt5/  fake/   albrooks done; rest Phase 7
   infrastructure/  logging/                           structured.py  events.py
   configuration/   config.py                          BridgeConfig  config_from_env
   cli/             __init__.py                        empty; CLI is Phase 8
@@ -101,17 +181,9 @@ the safe ones: `execution_enabled=False`, `dry_run=True`, `risk_percent=0.5`,
 `Event` enum with 12 event names, `StructuredLogger`, JSON and text formatters,
 and substring-based redaction of 13 sensitive key markers.
 
-### Tests: 126, all passing
-
-| File | Covers |
-|---|---|
-| `test_domain_isolation.py` | 7 tests. The architectural invariant: the domain imports nothing external, and no upstream project. |
-| `test_domain_models.py` | 70 tests. Every value object, its validation, and its invariants. |
-| `test_configuration.py` | 33 tests. Defaults, overrides, and failing loudly. |
-| `test_logging.py` | 28 tests. Redaction, JSON shape, handler hygiene, event vocabulary. |
-
-Quality gate, all clean: `ruff check`, `ruff format --check`, `mypy` (20 files),
-`pytest`.
+Three of those events are now emitted: `SIGNAL_RECEIVED`,
+`SIGNAL_REJECTED`, `SIGNAL_SOURCE_UNAVAILABLE`. The other nine are defined and
+reserved for the phase that introduces them.
 
 ---
 
@@ -246,57 +318,96 @@ likely to re-litigate by accident.
 
 ## Implemented Features
 
-Phase 1 produced a working foundation rather than a trading capability. What
-exists and works:
+What exists and works:
+
+**Phase 1 — foundation**
 
 - The **domain layer**, importable and testable with zero external dependencies.
+  Eleven value objects, six enums, a 39-code `RejectionReason`, twelve exceptions
+  under two roots.
 - The **ports**, as the only thing the inner layers may depend on.
 - **Configuration** that defaults to safe and fails loudly on a mistake.
 - **Structured logging** with a fixed event vocabulary and automatic redaction.
-- A **126-test suite** that runs in under a second, with no MetaTrader terminal,
-  no network and no upstream project installed.
 - **Setup scripts** for Windows, Linux and macOS, with no committed drive letter.
-- **Documentation**: architecture, integration contracts, setup, bilingual README.
 
-Not yet implemented, and not to be assumed: any part of the decision pipeline. A
-signal still goes nowhere. Phases 2 through 8 build it.
+**Phase 2 — the first adapter**
+
+- A working signal path: bars → `Analyzer.analyze` → internal `Signal`, with the
+  upstream's thirteen-key and three-key decision shapes both handled.
+- **Deterministic signal identity**, so the downstream deduplication can work
+  across a process restart.
+- **Stop and target provenance** carried through uninterpreted, ready for the
+  Phase 4 policy.
+- **245 tests**, in about 1.3 seconds, with no MetaTrader terminal, no network and
+  no upstream project required.
+
+**Documentation**: architecture, integration contracts, setup, signal flow,
+bilingual README.
+
+**Not yet implemented, and not to be assumed: any part of the decision pipeline
+past step 2.** A signal is read, normalised and logged — and then goes nowhere.
+There is no risk calculation, no position size, no validation, no dry run and no
+execution. Phases 3 through 8 build the rest of the path.
+
+The honest summary: the bridge can currently *understand* a signal and say what it
+would need in order to trade it. It cannot trade it.
 
 ---
 
 ## Tests
 
-**126 tests, all passing.** The suite runs in under a second and requires no
-MetaTrader terminal, no network access, and neither upstream project installed.
+**245 tests, all passing, in about 1.3 seconds.** The suite runs **without
+`albrooks` installed** and without MetaTrader 5, and the integration tests against
+the real engine skip cleanly.
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/unit/test_domain_isolation.py` | 7 | The architectural invariant: the domain imports nothing external and no upstream project. Walks the AST rather than importing. |
-| `tests/unit/test_domain_models.py` | 70 | Every value object, its validation, and its invariants — including the floor-up refusal and the unknown-status normalisation. |
-| `tests/unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
-| `tests/unit/test_logging.py` | 28 | Redaction cannot be bypassed, JSON shape, handler hygiene, event vocabulary completeness. |
+| `unit/test_albrooks_mapper.py` | 72 | The mapping, against stubs shaped like the real engine's output. |
+| `unit/test_domain_models.py` | 70 | Every value object, its validation, and its invariants. |
+| `unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
+| `unit/test_logging.py` | 28 | Redaction cannot be bypassed, JSON shape, handler hygiene, event vocabulary. |
+| `unit/test_albrooks_source.py` | 23 | Fetching, delegating, error paths, and the events emitted. |
+| `unit/test_ports.py` | 22 | Port narrowness, structural substitutability, annotation completeness. |
+| `unit/test_signal_identity.py` | 16 | Determinism, the bar-as-unit-of-identity, and the encoding. |
+| `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. |
+| `unit/test_domain_isolation.py` | 7 | The architectural invariant: the domain imports nothing external. |
+| **Total** | **245, 1 skipped** | |
+
+Coverage: **90%** of statements. `ports/` shows 0% line coverage, which is expected
+for `Protocol` declarations and says nothing — `unit/test_ports.py` checks their
+contract instead.
 
 The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   34 files already formatted
-mypy                    Success: no issues found in 20 source files
-pytest                  126 passed
+ruff format --check .   44 files already formatted
+mypy                    Success: no issues found in 23 source files
+pytest                  245 passed, 1 skipped
 ```
 
 `mypy` reports one informational note — an unused `[[tool.mypy.overrides]]` block
-for `MetaTrader5` / `albrooks` / `auto_trade`. It becomes used in Phases 2 and 7
-when the adapters that import them are written. Not an error, and deliberately
-left in place rather than added later, so the ignore exists before the import
-does.
+for `MetaTrader5` and `auto_trade`. It becomes used in Phase 7 when the adapters
+that import them are written. Deliberately left in place before the import exists,
+so the ignore is already there when the import arrives.
+
+**A skip is not a pass.** Both upstream projects make this point about their own
+live tests, and it applies here. Run `pytest tests/integration -v` explicitly
+before trusting an adapter change.
 
 The test counts here are a claim that every later change falsifies. **CI is the
 authority on what passes**; this table is a convenience.
 
 ### Tests deliberately not written yet
 
-The brief's Phase 1 does not require them, and writing them before the code they
-test exists would be theatre:
+Writing these before the code they test exists would be theatre:
+
+* position-sizing tests — Phase 4
+* stop and take-profit policy tests — Phases 4, 5
+* validation pipeline tests — Phase 6
+* idempotency tests — Phase 9
+* end-to-end tests — Phase 10
+* live MT5 tests — Phase 11, and only behind an explicit opt-in marker
 
 * position-sizing tests — Phase 4
 * signal adapter tests — Phase 2
@@ -343,76 +454,126 @@ to fix without the maintainer's agreement.
 
 ## Remaining Work
 
-### Phase 2 — Al Brooks signal adapter  ← next
+### Phase 3 — internal trading domain  ← next
 
-The first adapter, and the one that proves the anti-corruption layer works.
+Phase 1 built the value objects; this phase gives them their **policies**. The
+brief lists Phase 3 as "internal trading domain" and Phase 4 as "risk
+management", and the natural split is:
 
-- `adapters/albrooks/source.py` — `AlBrooksSignalSource`, implementing
-  `SignalSource`. Wraps `Analyzer.analyze(...)` and converts
-  `AnalysisResult` into the internal `Signal`.
-- `adapters/albrooks/identity.py` — the deterministic `signal_id`. See Open
-  Question 1; this is the phase that has to settle it.
-- `adapters/albrooks/mapper.py` — the decision-dict reading. **Read every key
-  with `.get()`**: the degenerate path returns three keys, not thirteen.
-- Import `albrooks` lazily, inside the adapter, so that importing the bridge
-  still works without it installed.
-- Tests with a **stub analyzer**, not the real one, so the suite keeps running
-  without the upstream checkout. Add a separate, opt-in integration test that
-  runs the real `Analyzer` and is skipped when it is absent.
+- **Phase 3** — the pure calculations and policies that need no market data:
+  stop resolution, take-profit resolution, and the validation rules. All of it
+  works on values already in hand.
+- **Phase 4** — everything that needs the account and the symbol: the risk amount,
+  the position sizer, and the broker constraint checks.
 
-The mapping rules, from the audit:
+Files to create, all in `domain/`:
 
-| Upstream | Internal |
+| File | Contents |
 |---|---|
-| `decision["action"]` `BUY`/`SELL` | `SignalAction.BUY`/`SELL` |
-| `decision["action"]` `WAIT` | `SignalAction.WAIT` (abstention, `Direction.FLAT`) |
-| `decision["action"]` `NO_TRADE` | `SignalAction.NO_TRADE` (abstention, `Direction.FLAT`) |
-| `decision["direction"]` ±1/0 | `Direction.from_sign(...)` |
-| `decision["plan"]["entry"]` | `Signal.entry` |
-| `decision["plan"]["stop"]` + `stop_basis` | `Signal.stop_loss` + `Signal.stop_basis` |
-| `decision["plan"]["target"]` + `target_basis` | `Signal.take_profit` + `Signal.take_profit_basis` |
-| `decision["subject"]` | `Signal.setup_id` |
-| `decision["evidence"]["value"]` | `Signal.evidence_score` — **not a probability** |
-| `AnalysisResult.last_closed_bar` | `Signal.bar_index` |
-| `Bar.time` of the last closed bar | `Signal.bar_time` (float epoch seconds) |
-| missing `plan` | no stop, no target → the risk service refuses in Phase 4 |
+| `stops.py` | `resolve_stop(signal, risk_parameters) -> StopLoss` plus the refusal reasons. Uses `StopSource` and `STRUCTURAL_STOP_BASES`, which already exist. |
+| `take_profit.py` | `resolve_take_profit(signal, stop, risk_parameters) -> TakeProfit`, honouring `TakeProfitSource`. |
+| `validation.py` | Geometry checks: stop on the wrong side, target on the wrong side, zero distance, non-positive prices. |
 
-`WAIT` and `NO_TRADE` both become abstentions, and **both must be preserved as
-different values**. They are different upstream claims, and collapsing them would
-lose the ability to explain afterwards why nothing happened.
+The stop policy, from `docs/architecture.md §5.4`:
 
-### Phases 3–13
+1. Use the signal's stop when `stop_basis` is structural.
+2. **Refuse** an `ATR_FALLBACK` stop by default; `RiskParameters.allow_volatility_fallback_stop`
+   permits it, and when permitted the decision records
+   `StopSource.SIGNAL_VOLATILITY_FALLBACK` so the log says the stop was a
+   volatility multiple.
+3. A missing or non-positive stop is always `NO_VALID_STOP`. **No code path may
+   synthesise a stop.**
+4. The engine gives an absolute price, never a distance, so no conversion is
+   needed. The adapter is the only place that knows which form it received.
 
-As laid out in `README.md`. Phase 4 is the substantial one — the tick-value
-position sizer with broker constraint handling.
+The take-profit policy, from §5.5:
+
+| `TakeProfitSource` | Behaviour |
+|---|---|
+| `RR_FALLBACK` (default) | Use the signal's target when `target_basis` is structural and the side is right; otherwise apply the ratio and record `RR_FALLBACK`. |
+| `SIGNAL` | Use the signal's target; refuse if unusable. |
+| `RR_DERIVED` | Ignore signal targets entirely. |
+| `NONE` | No take profit. |
+
+**A fallback is never silent.** `TakeProfit.source` records which path produced
+the number, so a log can never make a 1:1 target look like the engine's own
+measured move.
+
+Also in this phase: `TradeIntent` construction, which is where the pieces meet.
+
+### Phase 4 — risk management and position sizing
+
+The substantial phase, and the one the whole project exists for. See
+`docs/architecture.md §5.6` for the formula and §9 for the invariants.
+
+- `domain/sizing.py` — the tick-value position sizer. **No upstream project can
+  supply this**, verified in the audit.
+- `domain/risk.py` — the risk amount, and the refusal when a balance or a symbol
+  specification is unavailable.
+- Broker constraints: `volume_step` rounding **down**, `volume_max` clamping, and
+  a **refusal** when the volume lands below `volume_min`.
+
+The rule that must survive: `PositionSize.clamped_to_minimum` raises if set, and
+`SymbolSpec.clamp_volume` returns zero below the minimum rather than flooring up.
+A sizer that can exceed its own budget is the failure this project exists to
+prevent.
+
+### Phases 5–13
+
+As laid out in `README.md`.
 
 ---
 
-## Open questions Phase 0 deliberately did not settle
+## Open Questions
 
-Recorded rather than guessed. Each needs real data or the maintainer's decision.
+### Resolved
 
-1. **Exact `signal_id` composition.** Proposed: SHA-256 over
-   `(symbol, timeframe, last_closed_bar, bar_time, action, subject, entry, stop,
-   target)`. The unresolved tension: including the prices means a recomputation
-   that nudges the stop by one tick is a *new* signal and will trade again. Phase 9
-   must settle this against real engine output.
-2. **Whether the MT5 account/symbol adapter extends `albrooks.adapters.mt5` or
-   stands alone.** Both defensible. Depends on whether `albrooks` would accept a
-   new public surface — the maintainer's call.
-3. **Live MT5 validation target.** Alpari demo, terminal at
-   `C:\Users\bagheri\AppData\Roaming\Alpari MT5\terminal64.exe`, data folder
-   `C:\Users\bagheri\AppData\Roaming\MetaQuotes\Terminal\1BFBA8D123B04AAD5E48746348E9B594`.
-   Not touched in Phase 0. Phase 11 must confirm the terminal build matches what
-   `auto-trade`'s control ids were measured on (Known Issue 5).
-4. **The configuration name for the confidence threshold.** The underlying quantity
-   is an evidence score, not a probability, and both upstreams say so explicitly.
-   The brief calls it `minimum_signal_confidence`; that name is probably wrong and
-   should become something like `minimum_evidence_score`.
-5. **Whether `WAIT` and `NO_TRADE` should ever differ in bridge behaviour.** They
-   are both no-trade, but they are different upstream claims and the mapping is
-   currently lossless-but-identical. Worth revisiting if a phase needs the
-   distinction.
+**Q1. `signal_id` composition — settled in Phase 2, to be revisited in Phase 9.**
+
+SHA-256 over `(symbol, timeframe, bar_index, bar_time, action, direction,
+setup_id)`. **The prices are excluded, and the bar is the unit of identity.**
+
+The reasoning: re-delivery of the same reading must be recognised, a
+recomputation after new bars close must be a new trade, and a recomputation over
+the *same* bar that nudges a stop by one tick is the same reading with a rounding
+difference. The bar satisfies the first two; excluding the prices satisfies the
+third. Including them would let a flapping stop produce a fresh position every
+cycle.
+
+**The accepted trade-off:** if the engine materially revises a stop on the same
+closed bar, the bridge treats the revision as the same signal and suppresses it.
+That is a real limitation, stated rather than hidden. Phase 9 must check it
+against real engine output, and if a material revision turns out to be common the
+key will need a revision counter rather than a price hash.
+
+**The key format is `stb-<32 hex>`, and the field order is part of the
+contract.** Changing the order changes every key, which would make every
+previously-recorded signal look new and re-enable duplicates against a live
+ledger. A change needs a migration note here, not just a test update.
+
+### Still open
+
+**Q2. Whether the MT5 account/symbol adapter extends `albrooks.adapters.mt5` or
+stands alone.** Both defensible. Depends on whether `albrooks` would accept a new
+public surface — the maintainer's call, and it is not the bridge's to make.
+
+**Q3. Live MT5 validation target.** Alpari demo, terminal at
+`C:\Users\bagheri\AppData\Roaming\Alpari MT5\terminal64.exe`, data folder
+`C:\Users\bagheri\AppData\Roaming\MetaQuotes\Terminal\1BFBA8D123B04AAD5E48746348E9B594`.
+Not touched yet. Phase 11 must confirm the terminal build matches what
+`auto-trade`'s control ids were measured on (Known Issue 5).
+
+**Q4. `WAIT` and `NO_TRADE` in bridge behaviour.** Settled in Phase 2 as *stay
+distinct, behave identically*. Both are abstentions, both are refused, and the
+upstream reason travels with the signal, so a log can always say which one
+occurred. Reopen only if a phase needs the distinction to change a decision rather
+than a message.
+
+**Q5. Whether the bridge should eventually place its own orders through the
+`MetaTrader5` bindings**, bypassing the execution project's UI automation. It
+should not — the execution project owns execution, and the brief is explicit. Noted
+only so nobody later "simplifies" it away. The bridge's *data* adapter uses the
+bindings; its *execution* path does not.
 
 ---
 
@@ -500,9 +661,9 @@ afterwards and matches the local head exactly.
   `.gitattributes`. Committed and pushed as `68c8b87`, then `19e4888`.
 
 - **Phase 1** — built the foundation. `pyproject.toml` (setuptools, src layout,
-  Python ≥3.11, ruff, mypy, pytest, the `mt5` marker). The domain layer:
-  eleven frozen value objects, six enums, a 39-code `RejectionReason`, and
-  twelve exception classes under two roots. Seven ports. `BridgeConfig` with 16
+  Python ≥3.11, ruff, mypy, pytest, the `mt5` marker). The domain layer: eleven
+  frozen value objects, six enums, a 39-code `RejectionReason`, and twelve
+  exception classes under two roots. Seven ports. `BridgeConfig` with 16
   `BRIDGE_*` settings that default to safe and fail loudly. Structured logging
   with a 12-event vocabulary and substring-based redaction. 126 tests, including
   a domain-isolation test that walks the AST. Setup scripts for three platforms
@@ -526,6 +687,39 @@ afterwards and matches the local head exactly.
   modified frozen+slotted model with `{**intent.__dict__}`, which cannot work
   because such a model has no `__dict__`. Now uses `dataclasses.replace`, which
   also re-runs validation.
+
+- **Phase 2** — built the first adapter. `adapters/albrooks/` with
+  `identity.py` (deterministic `signal_id`), `mapper.py` (the anti-corruption
+  layer), and `source.py` (`AlBrooksSignalSource`). `Signal.entry` became
+  optional, because the engine returns `plan: None` on every abstention and
+  requiring one would have forced the adapter to substitute the last close for an
+  entry. The abstention path was split out so it needs no plan at all. Added
+  `tests/stubs.py` built from the audit's verbatim quotes, 22 port-contract
+  tests, 9 integration tests against the real `Analyzer`, and
+  `docs/signal-flow.md`. 245 tests, 90% coverage.
+
+  Four bugs found and fixed:
+  - `Signal.entry` was mandatory in Phase 1, which made the commonest outcome in
+    the system — "the engine found nothing to trade" — unmappable. It returned
+    `None` with an empty reason.
+  - An abstention was reported as `SIGNAL_DIRECTION_UNKNOWN` instead of being
+    mapped, because the shared builder required an entry.
+  - `source_direction` read the numeric `decision["direction"]` for abstentions,
+    so a stray non-zero value on a `WAIT` would have produced a tradable signal.
+    Now an abstention is `FLAT` unconditionally and the field is not read.
+  - A missing `action` key was reported as an unknown action, sending an
+    operator to look for a new enum member instead of at the upstream contract.
+
+  One test was wrong rather than the code: it asserted that two float timestamps
+  differing at the 16th digit produce different keys, but Python silently rounds
+  `1727740800.0000001` to `1727740800.0`, so it would have passed whether or not
+  the renderer worked. It now asserts the fixture values are distinct doubles
+  *before* checking the keys.
+
+  Settled the architecture audit's open question about `signal_id`: the prices
+  are excluded and the bar is the unit of identity. Reasoning and the accepted
+  trade-off are recorded above, and Phase 9 must revisit it against real engine
+  output.
 
 ---
 

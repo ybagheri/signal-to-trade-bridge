@@ -295,7 +295,17 @@ class Signal:
     timeframe: str
     action: SignalAction
     direction: Direction
-    entry: Decimal
+    #: The last close of the analysed bar. Required for a tradable signal, and
+    #: optional for an abstention.
+    #:
+    #: Optional rather than defaulted, because the two cases are genuinely
+    #: different things and a single mandatory field would force one of them to
+    #: carry a placeholder. The upstream engine returns ``plan: None`` on every
+    #: abstention, so "the engine found nothing to trade" -- the commonest outcome
+    #: in the system -- has no entry price at all. Requiring one would mean
+    #: substituting the last close for an entry, which is precisely the
+    #: substitution this project refuses to make.
+    entry: Decimal | None = None
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
     #: Where the stop came from upstream, when the source said. An
@@ -327,12 +337,26 @@ class Signal:
             raise ValueError("signal_id is required")
         if not self.symbol.strip():
             raise ValueError("symbol is required")
-        _positive(self.entry, "entry")
-        if self.action.is_tradable and not self.direction.is_tradable:
-            raise ValueError(
-                f"action {self.action.value} requires a tradable direction, "
-                f"got {self.direction.value}"
-            )
+        if self.action.is_tradable:
+            # A tradable action with no entry is a signal nobody can act on, and
+            # allowing it to be constructed would push the failure into the risk
+            # service as a confusing arithmetic failure rather than a clear
+            # validation error here.
+            if not self.direction.is_tradable:
+                raise ValueError(
+                    f"action {self.action.value} requires a tradable direction, "
+                    f"got {self.direction.value}"
+                )
+            if self.entry is None:
+                raise ValueError(
+                    f"action {self.action.value} requires an entry price; "
+                    "an abstention is the only signal that may omit one"
+                )
+            _positive(self.entry, "entry")
+        if self.bar_index < -1:
+            raise ValueError(f"bar_index cannot be below -1, got {self.bar_index}")
+        if self.evidence_score is not None and not 0.0 <= self.evidence_score <= 1.0:
+            raise ValueError(f"evidence_score must be between 0 and 1, got {self.evidence_score}")
         if self.bar_index < -1:
             raise ValueError(f"bar_index cannot be below -1, got {self.bar_index}")
         if self.evidence_score is not None and not 0.0 <= self.evidence_score <= 1.0:
