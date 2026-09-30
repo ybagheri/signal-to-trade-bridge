@@ -60,8 +60,8 @@ either.
 | 3 | Stop, take-profit and validation policies | ✅ complete |
 | 4 | Risk management and position sizing | ✅ complete |
 | 5 | 1:1 risk/reward take-profit policy | ✅ complete |
-| 6 | Trade validation pipeline | ⬜ next |
-| 7 | auto-trade execution adapter and MT5 account/symbol adapter | ⬜ |
+| 6 | Trade validation pipeline | ✅ complete |
+| 7 | auto-trade execution adapter and MT5 account/symbol adapter | ⬜ next |
 | 8 | Dry run / simulation mode | ⬜ |
 | 9 | Idempotency and duplicate protection | ⬜ |
 | 10 | End-to-end integration | ⬜ |
@@ -69,22 +69,23 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**614 tests passing, 96% coverage.** Lint, format, type check and the
+**664 tests passing, 96% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 installed** — which is what makes it a safety net rather than a souvenir.
 
-**What works today:** a signal is read from the price-action engine, normalised,
-given a deterministic identity, validated, given a stop and a take profit under an
-explicit policy, and then **sized**: the risk budget from the account balance and
-the configured percentage, and the volume from the symbol's tick value and the
-broker's volume constraints — tick-value based, so it is correct for gold, indices
-and CFDs without a special case. Every trade that gets through reports the
-reward:risk it *actually* has, not the one that was configured.
+**What works today:** a signal goes all the way to a decision. It is read from the
+price-action engine, normalised, given a deterministic identity, validated, given
+a stop and a take profit under an explicit policy, **sized** — the risk budget
+from the account balance and the configured percentage, the volume from the
+symbol's tick value and the broker's constraints — and turned into a
+`TradeDecision` carrying either a reason code or a fully sized intent. Every trade
+reports the reward:risk it *actually* has, not the one that was configured.
 
-**What does not:** nothing connects a sized trade to an order. The signal-to-size
-pipeline is Phase 6, and the account and symbol facts come from fakes until the
-MT5 data adapter of Phase 7 exists. A volume below the broker's minimum is refused
-rather than floored up — always.
+**What does not:** act on the decision. There is no executor wired into the
+pipeline, so a validated trade comes back as a dry run — every check passed,
+nothing sent, nothing could have been — and the account and symbol facts come
+from fakes until the MT5 data adapter of Phase 7 exists. A volume below the
+broker's minimum is refused rather than floored up, always.
 
 ---
 

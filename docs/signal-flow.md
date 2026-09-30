@@ -15,41 +15,56 @@ Market data
     ↓
 [1] Al Brooks engine                 albrooks.Analyzer.analyze(...)     Phase 0
     ↓  AnalysisResult.decision  (a dict, 3 or 13 keys)
-[2] Signal adapter                   → internal Signal      ← IMPLEMENTED, Phase 2
+[2] Signal adapter                   → internal Signal                  Phase 2
     ↓
-[3] Signal validation                                           IMPLEMENTED, Phase 3
+[3] Signal validation               validate_signal                    Phase 3
     ↓
-[4] Stop resolution                                            IMPLEMENTED, Phase 3
+[4] Stop resolution                 resolve_stop                       Phase 3
     ↓
-[5] Take-profit resolution                                       IMPLEMENTED, Phase 3, 5
+[5] Take-profit resolution          resolve_take_profit                Phase 3, 5
     ↓
-[6] Account + symbol data                             IMPLEMENTED via fakes, Phase 4
-    ↓                                                              real: Phase 7
-[7] Risk amount + position size                                     IMPLEMENTED, Phase 4
+[6] Geometry                        validate_geometry                  Phase 3
     ↓
-[8] Broker constraints                                          IMPLEMENTED, Phase 4
+[7] Policy                          validate_policy                    Phase 3
     ↓
-[9] Idempotency                                                 Phase 9
+[8] Account + symbol data            RiskService.read_account/read_spec  Phase 4
+    ↓                                                                  real: Phase 7
+[9] What the symbol can express      validate_against_spec             Phase 3
     ↓
-[10] Dry run?  record, stop                                      Phase 8
+[10] Risk amount                     resolve_risk_budget               Phase 4
     ↓
-[11] Execution                                          Phase 7
+[11] Position size                   resolve_position_size             Phase 4
+    ↓
+[12] The decision                    ProcessSignal.process             Phase 6  ← IMPLEMENTED
+    ↓
+[13] Idempotency                                               Phase 9
+    ↓
+[14] Dry run?  record, stop                                    Phase 8
+    ↓
+[15] Execution                                               Phase 7
     ↓
 MetaTrader 5 → broker
 ```
 
-**Every stage from 2 to 8 is implemented and tested. Nothing connects them.**
-There is still no `ProcessSignal`, so a signal arriving today goes nowhere — the
-functions exist, are individually correct, and have never been called in sequence.
+**Every stage from 2 to 12 is implemented, tested and — since Phase 6 — called in
+order by a single function.** `ProcessSignal.process(signal) -> TradeDecision`
+runs steps 3 to 12, stops at the first refusal, and returns either a `NO_TRADE`
+carrying a reason code or a `DRY_RUN` carrying a fully sized `TradeIntent`.
 
-That gap is Phase 6, and it is the first thing in this document that is *not* a
-Phase 0 finding: everything above it was discovered by auditing the two upstream
-repositories, and this was discovered by noticing that no line of `src/` mentions
-`resolve_stop` and `resolve_take_profit` together.
+It cannot place an order. There is no executor wired into it, so a passing trade
+comes back as `DRY_RUN` — "every check passed, nothing was sent, and nothing could
+have been". Phase 7 supplies the executor; Phase 8 makes the dry run report in
+full.
 
-Note also that step 6 is the only one whose *production* source is missing. In
-tests the account and symbol facts come from `adapters/fake/`, which is real code
-satisfying the real ports — not a stub that returns a tuple.
+Two properties exist only at this level, and are what the pipeline tests are for:
+
+- **the order** — cheap and decisive before expensive and outward-reaching. A
+  signal with no stop is refused before the account is ever read, so a malformed
+  signal costs no round trip to a terminal.
+- **the snapshot** — the account and the specification are read **once** each and
+  used for both the gate that admits the trade and the arithmetic that sizes it.
+  Two reads can straddle a close, and then the open-position count that admitted
+  the trade would not be the count that sized it.
 
 ---
 

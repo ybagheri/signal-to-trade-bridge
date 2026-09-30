@@ -12,23 +12,23 @@
 
 ## Current Status
 
-**Phases 0, 1, 2, 3, 4 and 5 complete. Phase 6 not started.**
+**Phases 0, 1, 2, 3, 4, 5 and 6 complete. Phase 7 not started.**
 
 Phase 0 audited the upstream repositories. Phase 1 built the foundation. Phase 2
-built the first adapter. Phase 3 gave the domain its **policies**: stop resolution,
-take-profit policy, and validation. Phase 4 added **risk management and position
-sizing**. Phase 5 finished the **reward:risk policy** — and found that the thing it
-was supposed to verify was, in the default configuration, not actually
-configured.
+built the first adapter. Phase 3 gave the domain its **policies**. Phase 4 added
+**risk management and position sizing**. Phase 5 finished the **reward:risk
+policy**. Phase 6 assembled them: `ProcessSignal` is the first thing in the
+project that calls the others, and the first time a signal has gone all the way
+to a decision.
 
-**614 tests passing, 96% coverage.** Every file touched by this phase is at 100%
-statement coverage. Lint, format, type check and the domain-isolation check all
-clean. The suite still runs **without `albrooks` installed**.
+**664 tests passing, 96% coverage.** Lint, format, type check and the
+domain-isolation check all clean. The suite still runs **without `albrooks`
+installed**.
 
 ```
-Last completed phase: 5
-Current phase:        6 (not started)
-Next phase:           6 — ProcessSignal, the trade validation pipeline
+Last completed phase: 6
+Current phase:        7 (not started)
+Next phase:           7 — the MT5 data adapter and the auto-trade execution adapter
 ```
 
 ---
@@ -41,7 +41,8 @@ Next phase:           6 — ProcessSignal, the trade validation pipeline
 - [x] **Phase 3** — Stop, take-profit and validation policies
 - [x] **Phase 4** — Risk management and position sizing
 - [x] **Phase 5** — 1:1 risk/reward
-- [ ] Phase 6 — Trade validation pipeline
+- [x] **Phase 6** — Trade validation pipeline
+- [ ] Phase 7 — auto-trade adapter
 - [ ] Phase 7 — auto-trade adapter
 - [ ] Phase 8 — Dry run / simulation
 - [ ] Phase 9 — Idempotency / duplicate protection
@@ -49,6 +50,113 @@ Next phase:           6 — ProcessSignal, the trade validation pipeline
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
+
+---
+
+## What Phase 6 Built
+
+```
+application/
+  process_signal.py  ProcessSignal.process(signal) -> TradeDecision
+                     STAGES, PASSED, budget_to_account
+  risk_service.py     budget_for() / size_for()   the resolve halves, added here
+tests/unit/
+  test_process_signal.py   50 tests: the order, the snapshot, the refusals
+```
+
+**This is the phase five others were deferring.** Every stage existed and was
+tested; nothing in `src/` had ever called two of them in sequence. A signal
+arriving today went nowhere, not because a piece was missing but because no
+function connected the pieces.
+
+### What it does
+
+```
+signal → validate_signal → resolve_stop → resolve_take_profit → validate_geometry
+       → validate_policy → validate_against_spec → budget → position size
+       → TradeIntent → TradeDecision
+```
+
+The order is the design, and it is specified rather than incidental: cheap and
+decisive before expensive and arithmetic. Signal validity costs nothing and
+rejects the commonest outcome in the system; the stop comes next because without
+one there is nothing to size against; geometry precedes policy because a malformed
+trade is not a policy question; and the account and specification come **last**,
+because they are the only stages that reach outside the process — so a signal
+with no stop costs no round trip to a terminal. There are tests for that
+specifically, not only for the refusals.
+
+### Design decisions Phase 6 made
+
+- **It stops at the first refusal.** Running a later check on a signal that has
+  already failed produces arithmetic on meaningless inputs — a position size
+  computed from a stop that does not exist is arithmetically fine and completely
+  wrong, which is the failure mode this project keeps running into. `diagnostics`
+  names the stage that refused, because "no trade" without "which check" is an
+  answer nobody can act on.
+- **Every outcome is a `TradeDecision`, never an exception.** An abstention, a
+  malformed signal and an unreachable terminal are ordinary outcomes, and the
+  commonest one is "the engine found nothing to trade". A loop that died on any
+  of them would stop processing the signals it could still act on.
+- **A passing trade is `DRY_RUN`, never `EXECUTE`,** and that is not a
+  placeholder. There is no executor wired in, so `EXECUTE` would be a lie; and
+  with the defaults the bridge cannot execute anyway. A trade that passed every
+  check and sent nothing must never be able to read as a fill, or a log becomes
+  evidence of an order that does not exist. **A test asserts the module imports no
+  `TradeExecutor`, `IdempotencyStore` or `KillSwitch`** — an execution path that
+  appeared before Phase 7 would be one without the kill switch, the idempotency
+  ledger and the audit log around it, which is the failure the architecture exists
+  to prevent. The constraint is structural, not left to review.
+- **The account and the specification are read once each.** The same account read
+  feeds the concurrency gate at stage 5 and the budget at stage 7, because two
+  reads can straddle a close — and then the open-position count that admitted the
+  trade would not be the count that sized it. This is why `RiskService` grew a
+  resolve half (`budget_for`, `size_for`) alongside its read-and-resolve
+  convenience methods: the pipeline reads, the service resolves. The old
+  single-call methods are kept and are now three-line wrappers.
+- **A concurrency limit that cannot be checked is refused, not skipped.** If
+  `max_open_positions` is set and the terminal does not answer, the trade is
+  refused. A limit that quietly stops applying when the account is unreachable is
+  a risk control that switches off exactly when it is most needed — and with no
+  limit configured the unreadable account is *not* fatal at that stage, because
+  there is no gate to evaluate; it refuses later at sizing, which is a different
+  moment and a different remedy.
+- **It uses geometry's validated pair from stage 4 onwards,** not the two values it
+  passed in. They are the same objects today; the difference is the point. The
+  stage exists to say "these two agree", and continuing to use the un-validated
+  copies would make it a function whose answer is ignored, which is how a check
+  stops being one.
+- **The clock is injected,** so a test can pin "now" and get an identical decision
+  twice. Phase 9's idempotency ledger depends on that determinism and cannot
+  provide it.
+- **`STOP_RESOLVED` and `TAKE_PROFIT_RESOLVED` are finally emitted** — two events
+  reserved in Phase 1 and still un-emitted after Phases 3 and 4, because Phase 4
+  established that the domain has no logger and must not acquire one. This is the
+  first layer that may hold one. `TAKE_PROFIT_RESOLVED` fires under
+  `TakeProfitSource.NONE` too: "a trade with no target because the operator
+  disabled targets" is a decision somebody will want to find in a log.
+
+### A finding worth recording
+
+**The geometry stage cannot refuse a signal that reaches it.** Every condition
+`validate_geometry` checks has already been checked by an earlier stage on the
+same objects — `resolve_stop` verified the stop price, its distance and its side,
+and `resolve_take_profit` verified the target's side, both building their results
+through models that refuse a non-positive distance at construction.
+
+It is kept, because the Phase 0 rationale still holds: the two functions have
+different callers, the geometry can come from configuration as well as from a
+signal, and a check that trusts its input to have been verified elsewhere fails
+the first time somebody calls it directly. But the honest position is recorded in
+`process_signal.py` and pinned by a test, rather than left for a reader to work
+out from the call sequence — a stage in the pipeline that can never fire is
+either dead code or a bug, and the code cannot tell you which.
+
+The consequence for coverage: `process_signal.py` is at **99%**, the one uncovered
+line being that refusal. The companion refusal — an incomplete specification, at
+the `spec` stage — *is* reachable and *is* tested, because a specification arrives
+from outside the process and may have been deserialised by someone else's code,
+which is a real difference from the stop and the take profit.
 
 ---
 
@@ -474,7 +582,8 @@ src/signal_to_trade_bridge/
                                 check_broker_constraints()
                    no external deps at all -- enforced by test_domain_isolation
   ports/           __init__.py                        seven Protocols
-  application/     risk_service.py                    Phase 4; ProcessSignal is Phase 6
+  application/     process_signal.py                  ProcessSignal   Phase 6
+                   risk_service.py                    RiskService     Phase 4, 6
   adapters/        albrooks/                          Phase 2, complete
                    fake/                              Phase 4, complete
                    auto-trade/  mt5/                   Phase 7
@@ -494,6 +603,7 @@ tests/
                    test_domain_isolation.py
                    test_risk_budget.py        test_position_sizing.py
                    test_risk_service.py       test_reward_risk_ratio.py
+                   test_process_signal.py
   integration/     test_albrooks_real.py            real Analyzer, opt-in
 docs/              architecture.md  integration.md  setup.md
                    signal-flow.md  risk-management.md
@@ -908,21 +1018,25 @@ Margin checking is also absent, and is recorded as a known gap rather than an
 oversight: a position can pass every check in this project and still be refused by
 the broker for insufficient margin.
 
-The honest summary: the bridge can **understand** a signal, **validate** it,
-**size** it, and say exactly what it would need in order to place it. It cannot
-yet place one.
+**Phase 6 changed this summary.** A signal now goes all the way to a decision: the
+bridge can **understand** a signal, **validate** it, **size** it, and **decide**
+about it in one call. What it still cannot do is **act** on the decision — there
+is no executor wired into the pipeline, and the default configuration cannot
+execute. The honest summary is now one sentence: *the bridge can decide to trade
+and cannot yet trade.*
 
 ---
 
 ## Tests
 
-**555 collected, 554 passed, 1 skipped in about 1.5 seconds.** The suite runs
+**665 collected, 664 passed, 1 skipped in about 1.5 seconds.** The suite runs
 **without `albrooks` installed** and without MetaTrader 5.
 
 | File | Tests | Covers |
 |---|---|---|
 | `unit/test_domain_models.py` | 91 | Every value object, its validation, and its invariants. |
 | `unit/test_stop_resolution.py` | 56 | The no-invented-stop rule, the basis policy, and every refusal path. |
+| `unit/test_process_signal.py` | 50 | **The pipeline**: the order, the snapshot, every stage's refusal, the events. |
 | `unit/test_take_profit_policy.py` | 50 | The four policies, the ratio arithmetic, and provenance. |
 | `unit/test_albrooks_mapper.py` | 49 | The mapping, against stubs shaped like the real engine's output. |
 | `unit/test_validation.py` | 48 | The four validation layers, fail-closed behaviour. |
@@ -939,7 +1053,7 @@ yet place one.
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **614 collected, 612 passed, 2 skipped** | |
+| **Total** | **665 collected, 664 passed, 1 skipped** | |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -947,19 +1061,28 @@ yet place one.
 > it reported were close to right for the wrong reasons. Nothing about the code
 > was affected — only the record of it, which is the thing this file is for.
 
-Coverage: **96%** of statements. The Phase 5 files — `test_reward_risk_ratio.py`
-and every line of `models.py`, `take_profit.py` and `config.py` this phase
-touched — are at **100%**, as are the five files Phase 4 added and the four Phase 3
-added. `ports/` shows 0% line coverage, which is expected for `Protocol`
-declarations and says nothing; `unit/test_ports.py` checks their contract instead.
+Coverage: **96%** of statements. The five files Phase 4 added, the four Phase 3
+added, and every line of `models.py`, `take_profit.py` and `config.py` Phase 5
+touched are at **100%**.
+
+**`process_signal.py` is at 99%, and the one uncovered line is deliberate.** It is
+the `validate_geometry` refusal, which cannot be reached — see *A finding worth
+recording* above. The companion `validate_against_spec` refusal *is* tested,
+because a specification arrives from outside the process. Leaving one line
+untested with the reason written down is more honest than manufacturing a way to
+reach it, which would mean bypassing two constructors that cannot produce an
+invalid value.
+
+`ports/` shows 0% line coverage, which is expected for `Protocol` declarations and
+says nothing; `unit/test_ports.py` checks their contract instead.
 
 The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   64 files already formatted
-mypy                    Success: no issues found in 32 source files
-pytest                  612 passed, 2 skipped
+ruff format --check .   66 files already formatted
+mypy                    Success: no issues found in 33 source files
+pytest                  664 passed, 1 skipped
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -978,7 +1101,7 @@ so the ignore is already there when the import arrives.
 live tests, and it applies here. Run `pytest tests/integration -v` explicitly
 before trusting an adapter change.
 
-### Four tests worth knowing about
+### Five tests worth knowing about
 
 `test_there_is_no_fallback_that_produces_a_stop` walks `stops.py`'s own AST and
 asserts that no numeric literal in it could serve as a price and that every
@@ -1003,8 +1126,14 @@ asserts it performs **no division of its own**. Phase 5 removed four inline
 `TradeIntent`. The rule is that the ratio has exactly three named entry points —
 `signal_target_ratio` for a target the resolver has not yet accepted,
 `achieved_ratio` for one it has, and `target_from_ratio` for deriving a price from
-a configured ratio — and the test is how "exactly three" stays true. It is the
-fourth test to read before touching ratio arithmetic anywhere.
+a configured ratio — and the test is how "exactly three" stays true.
+
+`test_this_module_holds_no_executor` walks `process_signal.py`'s AST and asserts
+it imports no `TradeExecutor`, `IdempotencyStore` or `KillSwitch`. The rule is
+that **execution belongs to Phase 7**, where the kill switch, the idempotency
+ledger and the audit log arrive with it — and the assertion is structural rather
+than behavioural because the failure mode it prevents is not a wrong answer but a
+whole missing safety envelope. It should keep passing until the ledger does.
 
 `test_a_missing_evidence_score_is_refused_not_allowed_through` pins the
 fail-closed direction of the evidence filter. A missing value counting as a pass
@@ -1078,42 +1207,53 @@ output looks finished.** Three of the four bugs fixed in this phase were in code
 that Phases 1 and 3 wrote, had 200+ passing tests, and was described here as
 complete.
 
-### Phase 6 — trade validation pipeline  ← next
+#### Phase 6 — trade validation pipeline  ← **done**
 
-`ProcessSignal`, the single use case. This is where the phases compose:
+`ProcessSignal.process(signal) -> TradeDecision`, running every stage in order and
+stopping at the first refusal. See *What Phase 6 Built* above.
 
-```
-signal → validate_signal → resolve_stop → resolve_take_profit → validate_geometry
-       → validate_policy → validate_against_spec → RiskService.position_size
-       → TradeIntent → TradeDecision
-```
+#### Phase 7 — adapters  ← next
 
-**This is the phase the project has been deferring.** Every stage above exists and
-is tested; nothing in `src/` has ever called most of them in sequence, which is why
-the audit could find the ratio wiring intact only as far as `BridgeConfig` and no
-further.
+**Two adapters, and they are different in kind.**
 
-Also Phase 6's, and it is why the boundary is here rather than later:
+1. **The MT5 data adapter** — a real `AccountProvider` and `SymbolSpecProvider` over
+   the `MetaTrader5` bindings. Written against the contract `adapters/fake/`
+   already pins, so the failing tests should already exist. The Phase 0 audit
+   found the pattern to copy in `albrooks.adapters.mt5.MT5Feed`: dependency-injected
+   `mt5_module`, a `Protocol` for the subset of the bindings used, and no
+   `import MetaTrader5` outside that one module. **Open Question 2** — extend
+   `albrooks.adapters.mt5` or stand alone — is still the maintainer's call, and
+   Phase 4 narrowed it without answering it.
 
-- **`STOP_RESOLVED`, `TAKE_PROFIT_RESOLVED` and `TRADE_VALIDATED` finally get
-  emitted.** Phase 4 established that the domain has no logger and must not
-  acquire one, so the two Phase 3 events are still un-emitted after two phases.
-  `ProcessSignal` is the first layer that may hold one.
-- **`TradeIntent` becomes constructible in anger,** including with
-  `take_profit=None` for the `NONE` policy — the case Phase 5 fixed the model for.
-- **`validate_policy`'s `max_open_positions`** gets a real value to check against,
-  since `AccountBalance.open_positions` exists and nothing has ever passed it.
+   This is the last thing standing between the pipeline and real account data. It
+   is also the first phase in seven that needs a machine with the bindings
+   installed, and the only one that cannot be fully verified here.
 
-Two things Phase 6 should **not** do, both of which a reader might reasonably
-assume: it should not build a second sizing or ratio mechanism (Phase 5 removed
-the duplication; do not reintroduce it), and it should not open a terminal or call
-an executor. Dry run and execution are Phase 8 and Phase 7.
+2. **The `auto-trade` execution adapter** — an `AutoTradeExecutor` wrapping
+   `ExecutionWorkflow`. **Wrapped, never bypassed**, per a Phase 0 decision that
+   still stands: calling its adapter directly would skip the risk engine, the kill
+   switch, the ledger, the state machine and the audit log.
 
-#### Phase 7 — adapters
+   The consequence for this phase is that the execution path is **not** just
+   `ProcessSignal` growing a field. It arrives with the kill switch, the
+   idempotency ledger and the audit log around it, which is why
+   `test_this_module_holds_no_executor` exists and why it should keep passing
+   until the ledger does.
 
-The real `AccountProvider` and `SymbolSpecProvider` over the `MetaTrader5`
-bindings, written against the contract `adapters/fake/` already pins, plus the
-`auto-trade` execution adapter wrapping `ExecutionWorkflow`.
+**Things Phase 7 must not skip:** the terminal is not launched by the bridge
+(`require_running_terminal` stays true and the terminal must already be running and
+logged in), and **do not open a live terminal outside Phase 11**. A real adapter
+test needs the bindings, not necessarily a terminal — `MT5Feed`-style injection
+means the account and symbol adapters are testable against a fake `mt5_module`,
+which is the whole reason that pattern was chosen.
+
+#### Phases 8–13
+
+Phase 8 (dry run) makes `DRY_RUN_COMPLETED` a real report rather than the honest
+placeholder Phase 6 emits. Phase 9 (idempotency) is where the ledger from
+`auto-trade` gets consulted and the deterministic `signal_id` from Phase 2 earns
+its keep — and it must revisit that key against real engine output first. Phase 10
+is end-to-end; Phase 11 is the live demo, opt-in only; 12 and 13 as laid out.
 
 ---
 
@@ -1492,6 +1632,27 @@ adapter, and neither could collect the integration tests:
   clamp that did not exist and which nothing referenced. A dead guard is worse
   than no guard, because it reads as though it handles a case it does not.
 
+- **Phase 6** — assembled the pipeline. `application/process_signal.py`:
+  `ProcessSignal.process(signal) -> TradeDecision`, running every stage in order
+  and stopping at the first refusal. `RiskService` gained a resolve half
+  (`budget_for`, `size_for`) so the account and the specification are one snapshot
+  per decision rather than two. `STOP_RESOLVED`, `TAKE_PROFIT_RESOLVED` and
+  `TRADE_VALIDATED` are finally emitted — the first two had been reserved since
+  Phase 1 and un-emitted for two phases, because Phase 4 established that the
+  domain must not hold a logger. 665 tests, 96% coverage.
+
+  No new bug in the domain, and that is worth noting: this phase found no defect
+  in code the earlier phases wrote. It found the *absence of a connection*, which
+  is the one class of problem only a phase that composes can find, and which five
+  phases of individually-correct functions could not.
+
+  One finding recorded rather than engineered around: **the geometry stage cannot
+  refuse a signal that reaches it**, because every condition it checks was already
+  checked by an earlier stage on the same objects. It is kept — the Phase 0
+  rationale for the duplication still holds — and the honest position is written
+  down and pinned by a test. `process_signal.py` is therefore at 99%, the one
+  uncovered line being that refusal.
+
 ---
 
 ## How To Continue
@@ -1502,7 +1663,7 @@ adapter, and neither could collect the integration tests:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **612 tests should pass, 2 skipped.** If
+   virtual environment is not set up. **664 tests should pass, 1 skipped.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
@@ -1515,20 +1676,20 @@ adapter, and neither could collect the integration tests:
 9. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 6** from the Remaining Work list above: `ProcessSignal`, the
-single use case that composes every stage. Every stage exists and is tested;
-nothing has ever called them in sequence.
+**Then start Phase 7** from the Remaining Work list above: the MT5 data adapter
+and the `auto-trade` execution adapter. Both are written against contracts that
+already exist — `adapters/fake/` pins the ports, and `docs/integration.md` §2
+spells out the upstream contracts.
 
-**A warning about this file's own claims, written after Phase 5.** Phases 4 and 5
-were each described here as "largely already implemented" or "verify the wiring
-and add the missing coverage". Both were wrong, and both hid real bugs in code with
-200+ passing tests — a tick-value divisor that under-sized positions, and a
-configuration idiom that silently swallowed a configured `0`. **Where this file
-says a phase's output looks finished, read the source before believing it.** A
-handoff that says "already done" is a claim to be checked, exactly like a claim
-about a path.
+**Phase 7 is the first phase in seven that cannot be fully verified on this
+machine**, because the MetaTrader bindings are not installed here and the
+upstream checkouts do not exist. Expect to finish it elsewhere, and write the
+adapter so that an injected `mt5_module` makes it testable without a terminal —
+that is the whole reason `albrooks.adapters.mt5.MT5Feed` was chosen as the
+pattern.
 
-**Before writing anything that touches money or ratios, read all four AST tests:**
+**Five AST tests before writing anything that touches money, ratios, or the
+pipeline order:**
 
 * [`tests/unit/test_stop_resolution.py::test_there_is_no_fallback_that_produces_a_stop`](tests/unit/test_stop_resolution.py)
 * [`tests/unit/test_risk_budget.py::test_there_is_no_fallback_that_produces_a_balance`](tests/unit/test_risk_budget.py)
@@ -1539,8 +1700,25 @@ The first three enforce one rule stated three times — *nothing in this project
 invents a stop, a balance or a tick value* — and will fail if the corresponding
 module gains a numeric literal that could serve as one. The fourth enforces that
 the reward:risk ratio is computed in exactly one place, so a policy cannot check
-one ratio while a decision log reports another. A contributor touching `stops.py`,
-`risk.py`, `sizing.py` or any ratio arithmetic should read all four first.
+one ratio while a decision log reports another.
+
+The fifth is not an AST test but is the same kind of rule:
+
+* [`tests/unit/test_process_signal.py::test_this_module_holds_no_executor`](tests/unit/test_process_signal.py)
+
+It asserts `process_signal.py` imports no `TradeExecutor`, `IdempotencyStore` or
+`KillSwitch`. It is the enforcement behind *execution belongs to Phase 7, where the
+kill switch, the ledger and the audit log come with it* — and **it should keep
+passing until the ledger does**, not merely until an executor exists.
+
+**A warning about this file's own claims, written after Phase 5 and still true.**
+Phases 4 and 5 were each described here as "largely already implemented" or
+"verify the wiring and add the missing coverage". Both were wrong, and both hid
+real bugs in code with 200+ passing tests — a tick-value divisor that under-sized
+positions, and a configuration idiom that silently swallowed a configured `0`.
+**Where this file says a phase's output looks finished, read the source before
+believing it.** A handoff that says "already done" is a claim to be checked,
+exactly like a claim about a path.
 
 **Standards for every phase, without exception:**
 

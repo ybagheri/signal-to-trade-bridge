@@ -1,16 +1,21 @@
 # Risk Management
 
-How a reading becomes a sized trade, and where it stops.
+How a reading becomes a sized trade, and what happens to it next.
 
-**Phase 4 completes the sizing pipeline.** Steps 1–6 were Phase 3's policies over
-values already in hand; steps 7 and 8 — the risk amount and the position size —
-are here. What remains unimplemented is everything *after* the size: the decision
-pipeline that wires these together with a signal (Phase 6) and the MT5 adapter
-that supplies the account and symbol facts in production (Phase 7).
+**The pipeline is assembled.** Steps 1–8 are the policies over values in hand;
+step 9 is the decision. Since Phase 6 a single function —
+`application.process_signal.ProcessSignal.process` — runs them in order, stops at
+the first refusal, and returns either a `NO_TRADE` carrying a reason code or a
+`DRY_RUN` carrying a fully sized `TradeIntent`.
 
-The bridge can now size a trade. It cannot yet decide to place one, because
-nothing connects a signal to this sizing — that is the next phase, and it is a
-deliberate order rather than an oversight.
+What remains unimplemented is everything *after* the decision: idempotency
+(Phase 9), dry-run reporting (Phase 8), execution (Phase 7) and the real MT5
+data adapter (Phase 7). In tests the account and symbol facts come from
+`adapters/fake/`, which satisfies the same ports the terminal adapter will.
+
+The bridge can now take a signal all the way to a sized, unsent decision. It
+cannot yet send one, because no executor is wired into the pipeline and the
+default configuration cannot execute.
 
 ---
 
@@ -27,21 +32,74 @@ Signal (from the adapter)
     ↓
 [4] validate_geometry      do entry, stop and target agree with each other?
     ↓
-[5] validate_policy        may *this bridge* act on it, under its own rules?
+[5] validate_policy        may *this bridge* act, under its own rules?
     ↓
 [6] validate_against_spec  can the symbol express these prices at all?
 ══════════ Phase 4: everything below needs the account and the symbol ══════════
 [7] resolve_risk_budget    balance × configured percentage
     ↓
 [8] resolve_position_size  ticks × tick value, rounded to the broker's step
-═════════════════════ Phase 6 begins here: ProcessSignal ══════════════════════
-    [9] idempotency, dry run, execution
+═════════════════════════════ Phase 6: the decision ════════════════════════════
+[9] TradeDecision          NO_TRADE with a reason, or DRY_RUN with an intent
+═════════════════════════════ Phase 9 → 8 → 7 ═════════════════════════════════
+    idempotency → dry run → execution
 ```
 
-Every step returns a `Resolution`: either a value or a reason code. **All eight are
-implemented.** Steps 1–6 are pure functions of their arguments; steps 7 and 8 are
-too, but they need facts that exist only in a terminal, so `application/risk_service.py`
-obtains them through the ports and hands them over.
+Every step returns a `Resolution`: either a value or a reason code. **All eight
+are implemented** — steps 1–6 are pure functions of their arguments, steps 7 and 8
+need facts that exist only in a terminal, and `application/process_signal.py` is
+what obtains them and puts the steps in order.
+
+### The order is the design
+
+Cheap and decisive before expensive and arithmetic. Signal validity costs nothing
+and rejects the commonest outcome in the system. The stop comes next because
+without one there is nothing to size against. Geometry is checked before policy
+because a malformed trade is not a policy question. The account and the
+specification come last, because they are the only steps that reach outside the
+process — so a signal that fails step 1 costs no round trip to a terminal. There
+are tests for that, not just for the refusals themselves.
+
+**It stops at the first refusal.** Running a later check on a signal that has
+already failed produces arithmetic on meaningless inputs. `diagnostics["stage"]`
+names the stage that refused, because "no trade" without "which check" is an
+answer nobody can act on.
+
+**The geometry stage always passes** when reached, and that is worth knowing: every
+condition it checks has already been checked by an earlier stage on the same
+objects. It stays because the two functions have different callers and a check
+that trusts its input to have been verified elsewhere fails the first time
+somebody calls it directly.
+
+### The account is one snapshot per decision
+
+The account is read **once** and the same read feeds both the concurrency gate at
+step 5 and the budget at step 7. Reading twice would be cheap and still wrong:
+two reads can straddle a close, and the open-position count that admitted the
+trade would not be the count that sized it.
+
+**A concurrency limit that cannot be checked is refused, not skipped.** If
+`max_open_positions` is set and the terminal does not answer, the trade is refused
+— a limit that quietly stops applying when the account is unreachable is a risk
+control that switches off exactly when it is most needed.
+
+### Every failure is a decision
+
+A malformed signal, an abstention, a stop on the wrong side, a terminal that is
+not running — all of them come back as a `TradeDecision` with a reason code, never
+as an exception. The commonest outcome in the system is "the engine found nothing
+to trade", and a loop that died on it would stop processing the signals it could
+still act on.
+
+### It cannot place an order
+
+A trade that passes every check comes back as `DRY_RUN`, not `EXECUTE`. There is
+no executor wired into the pipeline, so `EXECUTE` would be a lie — and calling it
+a dry run says exactly what happened: every check passed, nothing was sent, and
+nothing could have been. A test asserts the module imports no `TradeExecutor`,
+`IdempotencyStore` or `KillSwitch`, because an execution path that appears before
+Phase 7 would be one without the kill switch, the ledger and the audit log around
+it.
 
 ---
 
@@ -514,19 +572,21 @@ record that could be edited after the fact would not be one.
 | Risk amount | `AccountBalance` | **Done.** `domain/risk.py` |
 | Position size | `SymbolSpec` | **Done.** `domain/sizing.py` |
 | Broker constraints | `SymbolSpec` | **Done.** `check_broker_constraints` |
-| The account and spec in production | a terminal | Phase 7. `adapters/mt5/` |
+| Wiring signal → stop → size → decision | — | **Done.** `ProcessSignal` |
 | A real account/symbol provider in tests | — | **Done.** `adapters/fake/` |
-| Wiring signal → stop → size → decision | — | Phase 6. `ProcessSignal` |
+| The account and spec in production | a terminal | Phase 7. `adapters/mt5/` |
+| Idempotency / duplicate protection | the ledger | Phase 9 |
+| Dry-run reporting | an executor-shaped record | Phase 8 |
+| Execution | `auto-trade`'s `ExecutionWorkflow` | Phase 7 |
 | Margin check | live account state | Not scheduled. Recorded as a known gap: a position can pass every check here and still be refused for margin at the broker. |
 
 ---
 
 ## Invariants
 
-Established in Phases 3 and 4:
-
 1. **No code path invents a stop, a balance or a tick value.** Three AST tests, one
-   per module that could plausibly grow such a path.
+   per module that could plausibly grow such a path. A fourth asserts the
+   reward:risk ratio is computed in exactly one place.
 2. **A missing stop and a zero stop are one fault with one code**, because the
    engine uses `0.0` to mean "no stop".
 3. **A level at the entry is a distance problem, not a side problem**, for both
@@ -557,3 +617,16 @@ Established in Phases 3 and 4:
 16. **A configured zero is refused, never defaulted.** `Decimal("0")` is falsy, so
     the `or default` idiom would have brought the bridge up at 0.5% and 1:1 after
     the operator asked for neither.
+17. **The pipeline stops at the first refusal**, and the stages after it never
+    run — so a signal with no stop costs no round trip to a terminal.
+18. **Every outcome is a `TradeDecision`, never an exception.** An abstention, a
+    malformed signal and an unreachable terminal are all ordinary outcomes.
+19. **A concurrency limit that cannot be evaluated is refused, not skipped.** A
+    limit that stops applying when the terminal is unreachable switches off
+    exactly when it is most needed.
+20. **The account and the specification are one snapshot per decision**, so the
+    gate that admitted a trade and the arithmetic that sized it saw the same
+    numbers.
+21. **A passing trade is `DRY_RUN`, never `EXECUTE`,** and the pipeline module
+    imports no `TradeExecutor`. Execution belongs to Phase 7, where the kill
+    switch, the idempotency ledger and the audit log come with it.
