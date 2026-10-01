@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import sys
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -39,6 +43,11 @@ from signal_to_trade_bridge.domain.errors import IntegrationError
 from signal_to_trade_bridge.domain.models import AccountBalance, SymbolSpec
 from signal_to_trade_bridge.ports import AccountProvider, SymbolSpecProvider
 
+#: The login every stub reports, so a test can say "the snapshot agrees with the
+#: terminal" without repeating the number and risking a typo that makes the
+#: cross-check pass for the wrong reason.
+LOGIN = 12345678
+
 
 class StubAccountInfo:
     """Shaped like the bindings' account named tuple."""
@@ -49,7 +58,7 @@ class StubAccountInfo:
         balance: float | None = 10000.0,
         equity: float | None = 10000.0,
         currency: str | None = "USD",
-        login: int = 12345678,
+        login: int = LOGIN,
         name: str = "Alpari-Demo",
     ) -> None:
         self.balance = balance
@@ -472,6 +481,146 @@ class TestInsideTheRealPipeline:
         decision = pipeline.process(signal)
         assert decision.diagnostics["stage"] == "policy"
         assert decision.reason == "ACCOUNT_BALANCE_UNAVAILABLE"
+
+
+class TestTheOpenPositionCount:
+    """The gap Phase 7 opened, now narrowed.
+
+    ``account_info()`` has no position count, so this used to be hard-coded zero —
+    which is a lie whenever a position is open, and the consequence lands on the
+    concurrency gate: it saw zero, admitted the trade, and the limit did nothing.
+
+    The count now comes from the indicator's snapshot when a reader is injected.
+    These tests pin both halves of that, including the half that is still open.
+    """
+
+    class _FixedReader:
+        """A reader stub exposing only what the provider uses: ``read()``.
+
+        A snapshot stand-in rather than a real one, because these tests are about
+        the *wiring* — how many positions reach the account balance — and the real
+        parsing is pinned in ``test_mt5_position_reader.py``.
+        """
+
+        def __init__(self, count: int, account: int | None = None) -> None:
+            self._count = count
+            self._account = account
+            self.calls = 0
+
+        def read(self) -> Any:
+            self.calls += 1
+            return SimpleNamespace(count=self._count, account=self._account)
+
+    def test_without_a_reader_the_count_is_zero(self) -> None:
+        # Still the default, and still a lie when positions are open. A caller
+        # that does not pass a reader has accepted that.
+        assert MT5AccountProvider(_bindings()).balance().open_positions == 0
+
+    def test_a_reader_supplies_the_real_count(self) -> None:
+        reader = self._FixedReader(3, account=LOGIN)
+        balance = MT5AccountProvider(_bindings(), position_reader=reader).balance()  # type: ignore[arg-type]
+        assert balance.open_positions == 3
+        assert reader.calls == 1
+
+    def test_a_reader_that_cannot_answer_falls_back_to_zero(self) -> None:
+        # The remaining gap, and the reason `BRIDGE_MAX_OPEN_POSITIONS` must stay
+        # unset. Reporting "not known" as zero is the same lie in a narrower
+        # window -- narrower only because the reader is fail-closed on staleness.
+        from signal_to_trade_bridge.adapters.mt5 import MT5Unavailable
+
+        class Broken:
+            def read(self) -> Any:
+                raise MT5Unavailable("snapshot is stale")
+
+        balance = MT5AccountProvider(_bindings(), position_reader=Broken()).balance()  # type: ignore[arg-type]
+        assert balance.open_positions == 0
+
+    def test_a_snapshot_for_another_account_is_refused(self) -> None:
+        # The one reader outcome that is NOT treated as "not known".
+        #
+        # An unreadable file means the count is unknown, and zero is a defensible
+        # (if imperfect) answer to "unknown". A readable file naming a *different*
+        # login means something else entirely: this count belongs to someone else.
+        # Adopting it would report another account's flat book as this account's,
+        # which is a zero on the gate whenever that other account is flat -- and a
+        # zero that looks computed is far more convincing than one that looks like
+        # a fallback.
+        reader = self._FixedReader(0, account=LOGIN + 1)
+        with pytest.raises(MT5Unavailable, match="was written for account"):
+            MT5AccountProvider(_bindings(), position_reader=reader).balance()  # type: ignore[arg-type]
+
+    def test_a_matching_account_is_accepted(self) -> None:
+        reader = self._FixedReader(2, account=LOGIN)
+        balance = MT5AccountProvider(_bindings(), position_reader=reader).balance()  # type: ignore[arg-type]
+        assert balance.open_positions == 2
+
+    def test_a_snapshot_with_no_account_number_is_not_compared(self) -> None:
+        # `account` is optional in the snapshot, so an absent one cannot mismatch.
+        # Treating "unstated" as "matches" is the right default here precisely
+        # because the alternative -- refusing every snapshot that omits it -- would
+        # refuse on a field the indicator may legitimately leave out.
+        reader = self._FixedReader(4, account=None)
+        balance = MT5AccountProvider(_bindings(), position_reader=reader).balance()  # type: ignore[arg-type]
+        assert balance.open_positions == 4
+
+    def test_the_real_reader_can_be_wired_in(self, tmp_path: Path) -> None:
+        # The end-to-end shape: an account provider reading a real snapshot from
+        # a directory, with no terminal anywhere. The reader's own tests cover the
+        # parsing; this proves the wiring is possible at all.
+        from signal_to_trade_bridge.adapters.mt5.positions import MT5PositionReader
+
+        files = tmp_path / "MQL5" / "Files"
+        files.mkdir(parents=True)
+        (files / "auto_trade_positions_a.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "sequence": 5,
+                    "complete": True,
+                    "written_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "account": LOGIN,
+                    "server": "Alpari-MT5-Demo",
+                    "terminal_build": 6230,
+                    "positions": [
+                        {
+                            "ticket": 1,
+                            "symbol": "EURUSD",
+                            "type": "BUY",
+                            "volume": 0.01,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        reader = MT5PositionReader(tmp_path)
+        balance = MT5AccountProvider(_bindings(), position_reader=reader).balance()
+        assert balance.open_positions == 1
+
+    def test_the_real_reader_refuses_a_snapshot_from_another_account(self, tmp_path: Path) -> None:
+        # The cross-check through the real reader, not just the stub: the field is
+        # parsed as the type the terminal writes, and the comparison happens on it.
+        from signal_to_trade_bridge.adapters.mt5.positions import MT5PositionReader
+
+        files = tmp_path / "MQL5" / "Files"
+        files.mkdir(parents=True)
+        (files / "auto_trade_positions_a.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "sequence": 5,
+                    "complete": True,
+                    "written_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "account": "98765432",
+                    "server": "Alpari-MT5-Demo",
+                    "terminal_build": 6230,
+                    "positions": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(MT5Unavailable, match="98765432"):
+            MT5AccountProvider(_bindings(), position_reader=MT5PositionReader(tmp_path)).balance()
 
 
 class TestShutdown:

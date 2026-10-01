@@ -577,9 +577,11 @@ Seven rejections, in evaluation order:
 
 **There is no balance, no percentage and no monetary exposure check.**
 `max_open_positions` has no env var and no config wiring, and
-`AccountSnapshot.open_positions` is never populated by the real adapter, so gate
-7 is inert in production. The bridge must treat a `RiskEngine` rejection as an
-expected outcome, not a fault.
+`AccountSnapshot.open_positions` is never populated by `auto-trade`'s own adapter,
+so **gate 7 is inert inside `auto-trade`.** It is not inert in the bridge: the
+bridge populates the same field from the terminal's published position snapshot, so
+`BRIDGE_MAX_OPEN_POSITIONS` is the enforced one. The bridge must treat a
+`RiskEngine` rejection as an expected outcome, not a fault.
 
 ### 2.8 `ExecutionLedger` — reuse, do not rebuild
 
@@ -669,7 +671,6 @@ inline and not covered by `terminal-check`.
 working directory.
 
 **The bridge must not read any of these.** They are `auto-trade`'s configuration
-and they contain two absolute paths belonging to a different machine.
 
 ### 2.10 `MT5BridgeSignalProvider` — a possible alternative path
 
@@ -699,6 +700,72 @@ advice path, distinct from the outbound execution path the bridge uses.
 
 ---
 
+### 2.13 The `AutoTradePositionReader` snapshot — where `open_positions` comes from
+
+**This section was written in Phase 7 from the indicator's source
+(`mql5/Indicators/AutoTradePositionReader.mq5`) and confirmed against a live
+terminal.** It is not a transcription; it is the contract the bridge depends on.
+
+Two files under `<data path>\MQL5\Files`:
+
+```
+auto_trade_positions_a.json
+auto_trade_positions_b.json
+```
+
+**Only one of them normally exists.** The writer picks the target by
+`sequence % 2` and then **deletes the other one**. The two-file state exists only
+in the window between truncating the target and deleting its predecessor — and
+that window is the hazard, because `FileOpen(..., FILE_WRITE)` truncates before
+it writes. So:
+
+* **never** treat "both files present" as normal;
+* a missing file is not an error while the other parses;
+* a **parse** failure on one file is the signal to fall back to the other;
+* the write happens about **once per second**, so a **30-second** freshness limit
+  is thirty consecutive missed writes. `auto-trade`'s own reader uses the same
+  figure, and the two constants are asserted equal by a test — they must agree, or
+  one terminal looks alive to one reader and dead to the other.
+
+Top level:
+
+| Field | Type | Note |
+|---|---|---|
+| `schema` | `int` | `1`. Anything else is refused. |
+| `sequence` | `int` | Monotonic. The reader picks the highest it can parse. |
+| `complete` | `bool` | Always written as the literal `true`. The check is defensive. |
+| `written_at` | ISO-8601 `Z` | Compared against an injected clock with a 30 s allowance. |
+| `account` | login | The bridge cross-checks this against `account_info().login`. |
+| `server` | `str` | e.g. `Alpari-MT5-Demo`. Recorded, not enforced. |
+| `terminal_build` | `int` | The bridge reads and logs it. It is a load-bearing fact. |
+| `positions` | `list` | Empty on an idle account. |
+
+Each entry, **as written by the indicator** — not as this bridge models it:
+
+| Field | Type |
+|---|---|
+| `ticket`, `magic`, `symbol` | `int`, `int`, `str` |
+| `type` | `"BUY"` or `"SELL"` |
+| `volume`, `price_open`, `sl`, `tp`, `profit` | float |
+| `opened_at` | ISO-8601 `Z` |
+
+**Only `ticket`, `symbol`, `type` and `volume` are modelled here** — the four
+`auto-trade`'s verifier matches on. The rest stay in `ObservedPosition.raw` and are
+deliberately absent from the model, so nothing can come to depend on a field
+nobody has thought about. `type` is mapped `"BUY" → LONG`, `"SELL" → SHORT`.
+
+**Two parsing rules that are not obvious:**
+
+* **`parse_float=Decimal`.** `volume` is matched by `auto-trade`'s verifier on exact
+  `Decimal` equality. Round-tripping through `float` first would drift, and the
+  drift would fail the verification of a trade that actually succeeded.
+* **A malformed entry refuses the whole snapshot** rather than being skipped.
+  Skipping under-counts, and an under-count admits a trade the concurrency gate
+  should have refused.
+
+
+---
+
 ## 3. Gaps the bridge must fill — consolidated
 
 | Need | Why neither upstream can supply it |
@@ -710,6 +777,17 @@ advice path, distinct from the outbound execution path the bridge uses.
 | Stop-level / freeze-level / digits rounding | Not present in either project |
 | Structural logging for decisions | Neither has a decision-level event stream (`auto-trade`'s `AuditLogger` is execution-scoped) |
 | Deterministic `signal_id` | `auto-trade`'s ledger is keyed on it, but nothing upstream produces one — the engine has no signal identity at all |
+
+**Two of these rows are now closed, and it is worth saying how:**
+
+* *Account balance* and *Symbol specification* are supplied by the bridge's own
+  `adapters/mt5/` — Phase 7.
+* *Open position count* was on this list in an earlier draft and **no longer is.**
+  `account_info()` has no count, which is why Phase 7 first reported zero; but
+  `auto-trade`'s own `AutoTradePositionReader` indicator publishes the positions as
+  JSON, so the answer exists — see §2.13. The bridge reads it rather than adding
+  `positions_get()`, because a published snapshot is readable without the Python
+  bindings and does not depend on a call whose failure is easy to swallow.
 
 ---
 

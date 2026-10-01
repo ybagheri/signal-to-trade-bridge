@@ -9,10 +9,13 @@ only checked the format.
 
 from __future__ import annotations
 
+import re
+
 from signal_to_trade_bridge.adapters.albrooks.identity import (
     SIGNAL_ID_PREFIX,
     compute_signal_id,
 )
+from signal_to_trade_bridge.adapters.albrooks.mapper import map_result_to_signal
 from signal_to_trade_bridge.domain.enums import Direction, SignalAction
 
 
@@ -112,6 +115,65 @@ class TestDirectionAndAction:
         # Two setups can be valid on the same bar. They are different decisions
         # and must not collapse into one key.
         assert _key(setup_id="pullback_h#0") != _key(setup_id="double_bottom#0")
+
+
+class TestItSatisfiesTheDownstreamFilenameRule:
+    """`signal_id` is used as a file name, and must not be able to name a path.
+
+    Found in Phase 7, by reading `auto-trade`'s source rather than its
+    documentation. `TradeSignal` validates its id against
+    `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` because the id "is used as a file name and
+    must not be able to name a path" — and `../../x` fails that pattern.
+
+    That makes it a **security control on our side**, not a cosmetic constraint:
+    the execution project writes a file named after the id the bridge supplies. An
+    id containing a path separator or a drive letter would let a signal decide
+    where the execution project writes.
+
+    Phase 2 chose `stb-<32 hex>`, which satisfies it, and nothing tested that it
+    still did. The property is asserted here rather than left to a comment,
+    because the failure mode is a path traversal in someone else's log directory
+    and it would be silent.
+    """
+
+    #: The upstream rule, copied rather than imported: `auto_trade` is a private
+    #: repository that may not be installed, and this test has to run without it.
+    UPSTREAM_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+    def test_every_generated_id_matches_the_upstream_pattern(self) -> None:
+        from tests.stubs import stub_buy
+
+        signal = map_result_to_signal(stub_buy()).signal
+        assert signal is not None
+        assert self.UPSTREAM_PATTERN.match(signal.signal_id), (
+            f"{signal.signal_id!r} would be refused by auto-trade, whose id doubles as a "
+            f"file name and must not be able to name a path"
+        )
+
+    def test_an_id_can_never_contain_a_path_separator(self) -> None:
+        from tests.stubs import stub_buy
+
+        signal = map_result_to_signal(stub_buy()).signal
+        assert signal is not None
+        for forbidden in ("/", "\\", ":", "*", "?", '"', "<", ">", "|"):
+            assert forbidden not in signal.signal_id
+
+    def test_an_id_starts_with_a_letter_or_digit(self) -> None:
+        # A leading dot would satisfy "contains only dot, dash, underscore" while
+        # naming a hidden file, which is why the upstream pattern requires an
+        # alphanumeric first character.
+        from tests.stubs import stub_buy
+
+        signal = map_result_to_signal(stub_buy()).signal
+        assert signal is not None
+        assert signal.signal_id[0].isalnum()
+
+    def test_the_id_is_short_enough_for_the_upstream_limit(self) -> None:
+        from tests.stubs import stub_buy
+
+        signal = map_result_to_signal(stub_buy()).signal
+        assert signal is not None
+        assert len(signal.signal_id) <= 128
 
 
 class TestEncoding:
