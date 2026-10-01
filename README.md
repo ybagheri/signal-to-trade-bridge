@@ -70,7 +70,7 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**704 tests passing, 97% coverage.** Lint, format, type check and the
+**761 tests passing, 97% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
@@ -80,7 +80,8 @@ price-action engine, normalised, given a deterministic identity, validated, give
 a stop and a take profit under an explicit policy, **sized** from the account
 balance and the symbol's contract — both now readable from a real terminal — and
 turned into a `TradeDecision` carrying either a reason code or a fully sized
-intent.
+intent. The account snapshot the concurrency gate reads also comes from the terminal
+now, from the position file its own indicator publishes.
 
 **What does not:** act on the decision. No executor is wired into the pipeline, so
 a validated trade comes back as a dry run. A volume below the broker's minimum is

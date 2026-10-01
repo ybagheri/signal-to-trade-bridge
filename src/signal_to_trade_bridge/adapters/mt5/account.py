@@ -36,6 +36,7 @@ from signal_to_trade_bridge.adapters.mt5.bindings import (
     MT5Unavailable,
     load_bindings,
 )
+from signal_to_trade_bridge.adapters.mt5.positions import MT5PositionReader
 from signal_to_trade_bridge.domain.models import AccountBalance
 
 __all__ = ["MT5AccountProvider"]
@@ -53,12 +54,17 @@ class MT5AccountProvider:
         bindings: MT5Bindings | None = None,
         *,
         terminal_path: Path | None = None,
+        position_reader: MT5PositionReader | None = None,
     ) -> None:
         # Injectable, following `albrooks.adapters.mt5.MT5Feed`: the module is a
         # parameter so every branch below is testable without a terminal, and so
         # that `MetaTrader5` need not appear in any test file. Constructed with no
         # argument it connects for real.
         self._bindings = bindings if bindings is not None else load_bindings(terminal_path)
+        # Optional, and absent by default rather than defaulted. Without it the
+        # open-position count is zero, which is a *lie* when positions are open --
+        # see `_open_positions`.
+        self._positions = position_reader
 
     def balance(self) -> AccountBalance:
         """The current account state.
@@ -73,10 +79,72 @@ class MT5AccountProvider:
             balance=_decimal(info.balance, "balance"),
             currency=_currency(info.currency),
             equity=_decimal(info.equity, "equity"),
-            open_positions=_open_positions(),
+            open_positions=self._open_positions(info.login),
             account_login=int(info.login),
             server=info.name or None,
         )
+
+    def _open_positions(self, login: int) -> int:
+        """The number of open positions, from the indicator's snapshot.
+
+        **``account_info()`` does not carry a position count.** The bindings'
+        account named tuple has no such field, so before the position reader
+        arrived this function returned zero — which is a lie whenever a position
+        is open, and the consequence lands on
+        :func:`~signal_to_trade_bridge.domain.validation.validate_policy`'s
+        ``max_open_positions`` gate: it saw zero, admitted the trade, and the
+        limit did nothing.
+
+        The answer comes from the terminal itself, published as JSON by the
+        read-only ``AutoTradePositionReader`` indicator.
+
+        **A reader that cannot answer returns zero, and that is the remaining
+        known gap.** An unreadable, stale or malformed snapshot would mean "the
+        count is not known", and reporting that as zero is the same lie in a
+        narrower window. It is a *narrower* window because the reader is
+        fail-closed on staleness — a snapshot older than thirty seconds means the
+        indicator has stopped — but it is not closed.
+
+        **A snapshot from the wrong account does raise**, and the asymmetry is
+        deliberate. "Not known" and "known to be someone else's" are different
+        facts, and only the first is answered with a fallback. Adopting another
+        account's count would report its flat book as this account's — a zero on
+        the gate, arriving through the same code path as a computed answer, which
+        is the most convincing kind of wrong.
+
+        The honest fix for the remaining case is for this to raise like every other
+        missing fact, and it is not done here for a specific reason:
+        `AccountBalance` cannot be constructed without a count, so refusing would
+        make an unreadable *indicator* indistinguishable from an unreachable
+        *terminal*, and the two have different remedies. Until it is changed,
+        **an unset ``BRIDGE_MAX_OPEN_POSITIONS`` remains the only correct
+        configuration**, because that is the only setting for which the zero
+        cannot cause a trade to be admitted.
+        """
+        if self._positions is None:
+            return 0
+        try:
+            snapshot = self._positions.read()
+        except MT5Unavailable:
+            return 0
+
+        # A snapshot that belongs to a *different* account is not an absence of
+        # information, and that is why it is not handled like the exception above.
+        # An unreadable file means "the count is unknown"; a readable file naming
+        # another login means "this count belongs to someone else", and adopting it
+        # would report another account's flat book as this account's — which is a
+        # zero on the gate whenever that account happens to be flat, and the most
+        # convincing kind of wrong. It is the one case here that raises.
+        observed = snapshot.account
+        if observed is not None and observed != int(login):
+            raise MT5Unavailable(
+                f"the position snapshot was written for account {observed}, but the terminal "
+                f"is logged in as {int(login)}. Two accounts on one machine is the usual "
+                f"cause: a stale data folder from another login, or two terminals sharing "
+                f"one data path. Refusing, because another account's position count is not "
+                f"this account's."
+            )
+        return snapshot.count
 
     def _read(self) -> MT5AccountInfo:
         try:
@@ -140,32 +208,3 @@ def _currency(value: str) -> str:
     if not text:
         raise MT5Unavailable("the terminal reported no account currency")
     return text
-
-
-def _open_positions() -> int:
-    """Always zero, and documented as a known gap.
-
-    MT5's ``account_info()`` does not report a position count — that is
-    ``positions_get()``, a different call over a different shape. Reading it would
-    mean adding a fifth call to a four-call Protocol for a fact the bridge's own
-    concurrency gate is the only consumer of.
-
-    So the count is reported as zero, which is **wrong when positions are open**,
-    and the consequence is recorded rather than hidden:
-    `validate_policy`'s ``max_open_positions`` gate sees zero and admits a trade.
-    A gate that admits a trade it should have refused is the wrong direction.
-
-    Three things follow, and none of them is "leave it as zero":
-
-    * this must be implemented before any configuration sets
-      ``BRIDGE_MAX_OPEN_POSITIONS``;
-    * ``positions_get()`` belongs in this class, and the Protocol grows a method
-      when it does;
-    * Phase 0 recorded that ``auto-trade``'s own equivalent gate is **inert** for
-      the same reason — ``AccountSnapshot.open_positions`` is never populated. So
-      there is no second source to fall back on either.
-
-    Until then, an unset ``BRIDGE_MAX_OPEN_POSITIONS`` is not merely the safe
-    default but the only correct one.
-    """
-    return 0

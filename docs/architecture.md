@@ -671,9 +671,14 @@ bridge computes a volume from the balance, and `auto-trade` independently caps
 that volume. The bridge should treat a `RiskEngine` rejection as a normal,
 expected outcome and log it as such, not as a fault.
 
-Note also that `max_open_positions` has **no env var and no config wiring**; it
-defaults to `None`, and the real adapter never populates
-`AccountSnapshot.open_positions`, so that gate is inert in production.
+Note also that `max_open_positions` has **no env var and no config wiring**, and
+`AccountSnapshot.open_positions` is never populated by `auto-trade`'s own adapter,
+so that project's copy of the gate is inert in production. The bridge's copy is not:
+`adapters/mt5/positions.py` populates it from the terminal's own published snapshot,
+so `BRIDGE_MAX_OPEN_POSITIONS` is live here. It has one fail-open case — an unreadable
+snapshot reports zero, because refusing would make an unreadable indicator
+indistinguishable from an unreachable terminal — so **leaving it unset remains the
+only fully safe configuration**.
 
 ### 3.10 Configuration
 
