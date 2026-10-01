@@ -12,23 +12,24 @@
 
 ## Current Status
 
-**Phases 0, 1, 2, 3, 4, 5 and 6 complete. Phase 7 not started.**
+**Phases 0–6 complete. Phase 7 half done: the MT5 data adapter is built; the
+`auto-trade` execution adapter is not, and cannot be on this machine.**
 
 Phase 0 audited the upstream repositories. Phase 1 built the foundation. Phase 2
 built the first adapter. Phase 3 gave the domain its **policies**. Phase 4 added
 **risk management and position sizing**. Phase 5 finished the **reward:risk
-policy**. Phase 6 assembled them: `ProcessSignal` is the first thing in the
-project that calls the others, and the first time a signal has gone all the way
-to a decision.
+policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
+project that calls the others. Phase 7 built the **MT5 data adapter** — the last
+thing between the pipeline and real account facts.
 
-**664 tests passing, 96% coverage.** Lint, format, type check and the
-domain-isolation check all clean. The suite still runs **without `albrooks`
-installed**.
+**704 tests passing, 97% coverage.** Lint, format, type check and the
+domain-isolation check all clean. The suite still runs **without `albrooks`**
+**or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
 Last completed phase: 6
-Current phase:        7 (not started)
-Next phase:           7 — the MT5 data adapter and the auto-trade execution adapter
+Current phase:        7 — data adapter DONE, execution adapter blocked
+Next phase:           7b — AutoTradeExecutor, needs the auto-trade checkout
 ```
 
 ---
@@ -42,14 +43,140 @@ Next phase:           7 — the MT5 data adapter and the auto-trade execution ad
 - [x] **Phase 4** — Risk management and position sizing
 - [x] **Phase 5** — 1:1 risk/reward
 - [x] **Phase 6** — Trade validation pipeline
-- [ ] Phase 7 — auto-trade adapter
-- [ ] Phase 7 — auto-trade adapter
+- [~] **Phase 7** — MT5 data adapter **done**; `auto-trade` executor **blocked**
 - [ ] Phase 8 — Dry run / simulation
 - [ ] Phase 9 — Idempotency / duplicate protection
 - [ ] Phase 10 — End-to-end integration
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
+
+---
+
+## What Phase 7 Built
+
+```
+adapters/mt5/
+  __init__.py    the package docstring: the pattern, and what is not here yet
+  bindings.py    MT5Bindings, MT5AccountInfo, MT5SymbolInfo   three Protocols
+                 MT5Unavailable, load_bindings()   the one import site
+  account.py     MT5AccountProvider    AccountProvider
+  symbols.py     MT5SymbolSpecProvider SymbolSpecProvider
+tests/unit/
+  test_mt5_data_adapter.py   40 tests, no terminal and no bindings imported
+```
+
+**Phase 7 is half done, and the other half cannot be done on this machine.**
+The MT5 data adapter is complete and tested. The `auto-trade` execution adapter is
+not written, and the reason is in *What was deliberately not built* below.
+
+### The pattern, and why it makes this phase possible here
+
+Everything follows `albrooks.adapters.mt5.MT5Feed`, chosen in the Phase 0 audit
+precisely so that the adapter would be testable without a terminal:
+
+* **the bindings module is injected** — every branch is testable without MetaTrader
+  5, and no test file imports `MetaTrader5`. The whole 40-test file runs on the
+  machine this was written on, which has no bindings installed.
+* **`import MetaTrader5` lives in one function**, `load_bindings`, called lazily.
+  A test asserts it appears **exactly once** in the package and **not at module
+  level** — a stray module-level import would pass every behavioural test and break
+  the ones in files that do not inject the module.
+* **the subset used is a `Protocol`,** not `Any`. The bindings ship no type
+  information, so an untyped import would leave the boundary that converts
+  untyped data into typed domain objects itself untyped.
+* **the terminal path is a parameter,** never a constant, so no machine's path is
+  committed.
+* **nothing launches the terminal.** A test walks the AST and fails on any
+  `launch` attribute. `initialize` connects; `launch` starts a process, and a
+  process that launches a trading terminal is a process that can launch it by
+  accident — and one that launches it without a login is worse.
+
+### Design decisions Phase 7 made
+
+- **A missing fact raises. It never falls back.** An unreachable terminal, an
+  account that answers `None`, an unknown symbol — all raise
+  `MT5Unavailable`. The Phase 0 finding was that neither upstream project has
+  these facts, so inventing one is not an option this project has.
+- **`MT5Unavailable` is a `RuntimeError`, not a domain error.** By the time it is
+  raised the bridge is outside the domain: its error vocabulary describes *trading
+  refusals*, and "the terminal is not running" is a fact about the machine, not a
+  verdict on a trade.
+- **Floats become exact decimals via `Decimal(str(value))`,** never
+  `Decimal(value)`. The second form copies the binary double's exact value, so a
+  `tick_size` of `0.00001` arrives as `0.0000100000000000000002092251` and every
+  tick count derived from it is slightly wrong in a way that looks entirely right.
+  There is a test that asserts the resulting `risk_per_unit` is exactly `300`.
+- **A missing field raises and names itself** rather than becoming zero. A zero
+  tick size would be caught downstream as a *sizing* refusal, which points an
+  operator at the arithmetic instead of at the terminal that failed to answer.
+- **An empty `currency_profit` is passed through, not raised.** The asymmetry is
+  deliberate: an unstated profit currency is a fact the *domain* already handles by
+  refusing the trade, so the adapter reports it and stops. Refusing here too would
+  be right for the wrong reason, and would move a policy decision into a converter.
+- **No cache.** A specification does not change within a session, but a cache is a
+  cache that can go stale across a broker changing a contract mid-session, and a
+  re-read costs one local IPC call. Caching belongs at the composition root with a
+  stated lifetime.
+
+### A gap this phase found and could not close
+
+**`open_positions` is reported as `0`, and that is wrong when positions are open.**
+
+`account_info()` does not carry a position count — that is `positions_get()`, a
+different call over a different shape. So `AccountBalance.open_positions` is
+always zero, and the consequence is real: **a configured `BRIDGE_MAX_OPEN_POSITIONS`
+gate sees zero and admits a trade it should have refused.** A gate that admits a
+trade is the wrong direction to be wrong in.
+
+Three things follow, and none of them is "leave it as zero":
+
+* it must be fixed before any configuration sets `BRIDGE_MAX_OPEN_POSITIONS`;
+* the fix is `positions_get()` in `MT5AccountProvider`, and `MT5Bindings` grows a
+  method when it does — the four-call Protocol is deliberately short, and a call
+  whose failure the adapter would ignore has no business being in it;
+* there is no second source to fall back on: the Phase 0 audit found
+  `auto-trade`'s own equivalent gate **inert** for the same reason, since
+  `AccountSnapshot.open_positions` is never populated.
+
+There is a test asserting the current behaviour, named so that a reader finds the
+gap rather than the answer. **Until it is fixed, an unset
+`BRIDGE_MAX_OPEN_POSITIONS` is not merely the safe default but the only correct
+one.**
+
+### What was deliberately not built, and why
+
+**`AutoTradeExecutor` and everything in `adapters/auto_trade/` is not written.**
+
+The Phase 7 plan wraps `auto-trade`'s real `ExecutionWorkflow`. That package is a
+private repository and is **not installed on this machine** — and neither is
+`MetaTrader5`, which is why the data adapter was testable only because it takes an
+injected module.
+
+Writing the execution adapter here would mean writing it against
+`docs/integration.md` §2, which was transcribed from the upstream source in Phase 0
+but cannot be re-checked now. The result would be code that *looks* finished, has
+40 passing tests asserting my own assumptions back at me, and has never been
+compared to the thing it calls. **That is precisely the shape of work this project
+has spent six phases refusing**: Phases 4 and 5 each found real bugs in code that
+had many passing tests and was believed complete.
+
+The consequence is recorded rather than papered over: with no executor,
+`ProcessSignal` returns `DRY_RUN` for every valid trade, and
+`test_this_module_holds_no_executor` still passes — as it should, because the
+ledger, the kill switch and the audit log have not arrived either. **This is Phase
+7b, and it needs a machine with the `auto-trade` checkout.**
+
+### What cannot be verified here at all
+
+The field names. `trade_tick_size`, `tick_value_profit` and the rest are MT5's own
+and are taken from the Phase 0 audit of the bindings' contract, not from the
+installed package. If MT5 has renamed a field, this adapter would fail at runtime
+with an `AttributeError` — which is a loud, obvious failure rather than a silent
+wrong number, but it is a failure nonetheless.
+
+**Phase 11 is where the real bindings get exercised**, behind its explicit opt-in
+marker. Until then: the conversion logic is tested, the field names are not.
 
 ---
 
@@ -586,7 +713,8 @@ src/signal_to_trade_bridge/
                    risk_service.py                    RiskService     Phase 4, 6
   adapters/        albrooks/                          Phase 2, complete
                    fake/                              Phase 4, complete
-                   auto-trade/  mt5/                   Phase 7
+                   mt5/       Phase 7, complete (data; the executor is 7b)
+                   auto-trade/                               Phase 7b, blocked
   infrastructure/  logging/                           structured.py  events.py
   configuration/   config.py                          BridgeConfig  config_from_env
   cli/             __init__.py                        empty; CLI is Phase 8
@@ -603,7 +731,7 @@ tests/
                    test_domain_isolation.py
                    test_risk_budget.py        test_position_sizing.py
                    test_risk_service.py       test_reward_risk_ratio.py
-                   test_process_signal.py
+                   test_process_signal.py     test_mt5_data_adapter.py
   integration/     test_albrooks_real.py            real Analyzer, opt-in
 docs/              architecture.md  integration.md  setup.md
                    signal-flow.md  risk-management.md
@@ -1020,17 +1148,19 @@ the broker for insufficient margin.
 
 **Phase 6 changed this summary.** A signal now goes all the way to a decision: the
 bridge can **understand** a signal, **validate** it, **size** it, and **decide**
-about it in one call. What it still cannot do is **act** on the decision — there
-is no executor wired into the pipeline, and the default configuration cannot
-execute. The honest summary is now one sentence: *the bridge can decide to trade
-and cannot yet trade.*
+about it in one call — and since Phase 7 it can read the account and symbol facts
+from a real MetaTrader 5 terminal. What it still cannot do is **act** on the
+decision: there is no executor wired into the pipeline, and the default
+configuration cannot execute. The honest summary is one sentence: *the bridge can
+decide to trade and cannot yet trade.*
 
 ---
 
 ## Tests
 
-**665 collected, 664 passed, 1 skipped in about 1.5 seconds.** The suite runs
-**without `albrooks` installed** and without MetaTrader 5.
+**705 collected, 704 passed, 1 skipped in about 2 seconds.** The suite runs
+**without `albrooks` or `MetaTrader5` installed** and without a terminal — the
+MT5 adapter takes its bindings by injection, which is what makes that possible.
 
 | File | Tests | Covers |
 |---|---|---|
@@ -1041,6 +1171,7 @@ and cannot yet trade.*
 | `unit/test_albrooks_mapper.py` | 49 | The mapping, against stubs shaped like the real engine's output. |
 | `unit/test_validation.py` | 48 | The four validation layers, fail-closed behaviour. |
 | `unit/test_position_sizing.py` | 46 | The sizer, the three floor-up guards, and the conservative tick value. |
+| `unit/test_mt5_data_adapter.py` | 40 | **The MT5 adapter**, against an injected bindings module. No terminal, no import. |
 | `unit/test_reward_risk_ratio.py` | 44 | The opt-in floor, the achieved-ratio reporting, one ratio implementation. |
 | `unit/test_risk_service.py` | 35 | The wiring, the two reserved events, and the fakes as port implementations. |
 | `unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
@@ -1053,7 +1184,7 @@ and cannot yet trade.*
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **665 collected, 664 passed, 1 skipped** | |
+| **Total** | **705 collected, 704 passed, 1 skipped** | |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1061,9 +1192,9 @@ and cannot yet trade.*
 > it reported were close to right for the wrong reasons. Nothing about the code
 > was affected — only the record of it, which is the thing this file is for.
 
-Coverage: **96%** of statements. The five files Phase 4 added, the four Phase 3
-added, and every line of `models.py`, `take_profit.py` and `config.py` Phase 5
-touched are at **100%**.
+Coverage: **97%** of statements. The four files Phase 7 added, the five Phase 4
+added, the four Phase 3 added, and every line of `models.py`, `take_profit.py`
+and `config.py` Phase 5 touched are at **100%**.
 
 **`process_signal.py` is at 99%, and the one uncovered line is deliberate.** It is
 the `validate_geometry` refusal, which cannot be reached — see *A finding worth
@@ -1080,9 +1211,9 @@ The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   66 files already formatted
-mypy                    Success: no issues found in 33 source files
-pytest                  664 passed, 1 skipped
+ruff format --check .   70 files already formatted
+mypy                    Success: no issues found in 36 source files
+pytest                  704 passed, 1 skipped
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -1212,40 +1343,34 @@ complete.
 `ProcessSignal.process(signal) -> TradeDecision`, running every stage in order and
 stopping at the first refusal. See *What Phase 6 Built* above.
 
-#### Phase 7 — adapters  ← next
+#### Phase 7 — adapters  ← **half done; the execution half is blocked**
 
-**Two adapters, and they are different in kind.**
+**Done:** the MT5 data adapter. See *What Phase 7 Built* above. Complete and
+tested without a terminal, which is the whole reason the `MT5Feed` injection
+pattern was chosen in Phase 0.
 
-1. **The MT5 data adapter** — a real `AccountProvider` and `SymbolSpecProvider` over
-   the `MetaTrader5` bindings. Written against the contract `adapters/fake/`
-   already pins, so the failing tests should already exist. The Phase 0 audit
-   found the pattern to copy in `albrooks.adapters.mt5.MT5Feed`: dependency-injected
-   `mt5_module`, a `Protocol` for the subset of the bindings used, and no
-   `import MetaTrader5` outside that one module. **Open Question 2** — extend
-   `albrooks.adapters.mt5` or stand alone — is still the maintainer's call, and
-   Phase 4 narrowed it without answering it.
+**Not done, and not started:** `AutoTradeExecutor` wrapping
+`auto-trade`'s `ExecutionWorkflow`. **Wrapped, never bypassed**, per a Phase 0
+decision that still stands: calling its adapter directly would skip the risk
+engine, the kill switch, the ledger, the state machine and the audit log.
 
-   This is the last thing standing between the pipeline and real account data. It
-   is also the first phase in seven that needs a machine with the bindings
-   installed, and the only one that cannot be fully verified here.
+It is blocked on the environment, not on the work. `auto_trade` is a private
+repository and is not installed on the machine this was written on, so the adapter
+would have to be written against a transcription of its API in
+`docs/integration.md` §2 with nothing to check it against. That is the shape of
+work this project has spent six phases refusing, and the reasoning is recorded in
+*What was deliberately not built* above.
 
-2. **The `auto-trade` execution adapter** — an `AutoTradeExecutor` wrapping
-   `ExecutionWorkflow`. **Wrapped, never bypassed**, per a Phase 0 decision that
-   still stands: calling its adapter directly would skip the risk engine, the kill
-   switch, the ledger, the state machine and the audit log.
+**What Phase 7b needs:** a machine with the `auto-trade` checkout, so the mapping
+from the bridge's `ExecutionRequest` to `auto_trade`'s `TradeSignal` and back from
+`ExecutionResult` can be written against the real classes. `docs/integration.md`
+§2.2–2.5 has the contracts; §2.10 has the status vocabulary, including the
+`UNKNOWN` state that must never be auto-retried.
 
-   The consequence for this phase is that the execution path is **not** just
-   `ProcessSignal` growing a field. It arrives with the kill switch, the
-   idempotency ledger and the audit log around it, which is why
-   `test_this_module_holds_no_executor` exists and why it should keep passing
-   until the ledger does.
-
-**Things Phase 7 must not skip:** the terminal is not launched by the bridge
-(`require_running_terminal` stays true and the terminal must already be running and
-logged in), and **do not open a live terminal outside Phase 11**. A real adapter
-test needs the bindings, not necessarily a terminal — `MT5Feed`-style injection
-means the account and symbol adapters are testable against a fake `mt5_module`,
-which is the whole reason that pattern was chosen.
+**It arrives with the ledger, not before.** `test_this_module_holds_no_executor` in
+`tests/unit/test_process_signal.py` asserts the pipeline imports no `TradeExecutor`,
+`IdempotencyStore` or `KillSwitch`, and **it should keep passing until the ledger
+does** — not merely until an executor exists.
 
 #### Phases 8–13
 
@@ -1444,22 +1569,26 @@ afterwards and matches the local head exactly.
 ### What could not be verified on this machine
 
 Recorded rather than glossed over, because the alternative is a handoff that
-claims more than anyone checked. Unchanged through Phases 4, 5 and 6 — none of
-them touched an adapter:
+claims more than anyone checked. Unchanged through Phases 4–6 — none of them
+touched an adapter — and now partly relevant to Phase 7:
 
-* **`pytest tests/integration` has not run in three phases.** The nine tests
-  against the real `Analyzer` collect only when `albrooks` is installed, and it is
-  not installed here. Phase 3 verified them green. Phases 4–6 touch no adapter
+* **`pytest tests/integration` has not run in four phases.** The nine tests against
+  the real `Analyzer` collect only when `albrooks` is installed, and it is not
+  installed here. Phase 3 verified them green. Phases 4–7 touch no `albrooks`
   code, so they are *expected* to be unchanged — and they have **not** been run.
+* **The MT5 field names are unverified.** `trade_tick_size`,
+  `trade_tick_value_profit` and the rest are MT5's own and are taken from the
+  Phase 0 audit of the bindings' contract, not from the installed package —
+  `MetaTrader5` is **not installed here**. A rename would surface as an
+  `AttributeError` at runtime, which is loud, but it is still a failure. The
+  conversion logic is tested; the names are not. **Phase 11 exercises the real
+  bindings** behind its opt-in marker.
 * **The MT5 terminal build is unknown.** Alpari MT5 `_4`, and `auto-trade`'s
   control ids were measured on build 6184. Nothing was clicked and no terminal was
   opened — Known Issue 5 is unresolved and Phase 11 owns it.
-* **No upstream checkouts exist here**, so `scripts/setup.ps1` has not been run on
-  this machine either.
-
-**Phase 7 is the first phase that cannot be finished here at all**, because it
-needs the `MetaTrader5` bindings and the `auto-trade` checkout. Both are on the
-developer's other machine.
+* **No upstream checkouts exist here.** Neither `albrooks` nor `auto_trade` is
+  present, so `scripts/setup.ps1` has not been run on this machine, and **Phase 7b
+  cannot be started here at all.**
 
 ---
 
@@ -1657,6 +1786,27 @@ developer's other machine.
   down and pinned by a test. `process_signal.py` is therefore at 99%, the one
   uncovered line being that refusal.
 
+- **Phase 7 (part)** — the MT5 data adapter. `adapters/mt5/` with
+  `bindings.py` (three Protocols, `MT5Unavailable`, and the project's single
+  `import MetaTrader5`), `account.py` and `symbols.py`. 40 tests against an
+  injected bindings module: no terminal, no bindings import, and the whole file
+  runs on a machine that has neither. 704 tests, 97% coverage, the four new files
+  at 100%.
+
+  **The execution half is not written, and the reason is the environment.**
+  `AutoTradeExecutor` must wrap `auto-trade`'s real `ExecutionWorkflow`, and
+  `auto_trade` is a private repository that is not installed here. Writing it
+  against the Phase 0 transcription in `docs/integration.md` §2 would produce code
+  with forty passing tests that assert my own assumptions back at me and have
+  never been compared to the thing they call. Recorded as Phase 7b.
+
+  A gap found and not closed: **`open_positions` is always zero**, because
+  `account_info()` does not carry a position count. A configured
+  `BRIDGE_MAX_OPEN_POSITIONS` therefore admits a trade it should refuse. The fix
+  is `positions_get()` in `MT5AccountProvider`, and it must land before any
+  configuration sets that variable. `auto-trade`'s own equivalent gate is inert for
+  the same reason, so there is no second source.
+
 ---
 
 ## How To Continue
@@ -1667,7 +1817,7 @@ developer's other machine.
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **664 tests should pass, 1 skipped.** If
+   virtual environment is not set up. **704 tests should pass, 1 skipped.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
@@ -1680,17 +1830,21 @@ developer's other machine.
 9. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 7** from the Remaining Work list above: the MT5 data adapter
-and the `auto-trade` execution adapter. Both are written against contracts that
-already exist — `adapters/fake/` pins the ports, and `docs/integration.md` §2
-spells out the upstream contracts.
+**Then start Phase 7b** — the `auto-trade` execution adapter — from the Remaining
+Work list above. It needs a machine where `scripts/setup.ps1` has been run and the
+`auto_trade` checkout exists; it cannot be done here.
 
-**Phase 7 is the first phase in seven that cannot be fully verified on this
-machine**, because the MetaTrader bindings are not installed here and the
-upstream checkouts do not exist. Expect to finish it elsewhere, and write the
-adapter so that an injected `mt5_module` makes it testable without a terminal —
-that is the whole reason `albrooks.adapters.mt5.MT5Feed` was chosen as the
-pattern.
+**If you are on a machine with those checkouts**, the order is: write
+`adapters/auto_trade/executor.py` against the real `ExecutionWorkflow`, then
+`FakeTradeExecutor` (the last unimplemented port), and only then let
+`ProcessSignal` grow an executor reference — at which point
+`test_this_module_holds_no_executor` must be revisited deliberately, not deleted
+quietly. The ledger, the kill switch and the audit log come with it.
+
+**If you are not**, the useful work available here is Phase 8: turning
+`DRY_RUN_COMPLETED` into a real report, and the CLI/composition root that wires
+the pipeline and the MT5 adapter together. Both are pure application-layer work
+and both are untested for want of a caller — which is the same trap Phase 6 found.
 
 **Five AST tests before writing anything that touches money, ratios, or the
 pipeline order:**

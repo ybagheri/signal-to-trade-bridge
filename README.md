@@ -61,7 +61,8 @@ either.
 | 4 | Risk management and position sizing | ✅ complete |
 | 5 | 1:1 risk/reward take-profit policy | ✅ complete |
 | 6 | Trade validation pipeline | ✅ complete |
-| 7 | auto-trade execution adapter and MT5 account/symbol adapter | ⬜ next |
+| 7 | MT5 account/symbol adapter | ✅ complete |
+| 7b | auto-trade execution adapter | ⬜ next — needs the `auto-trade` checkout |
 | 8 | Dry run / simulation mode | ⬜ |
 | 9 | Idempotency and duplicate protection | ⬜ |
 | 10 | End-to-end integration | ⬜ |
@@ -69,23 +70,21 @@ either.
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**664 tests passing, 96% coverage.** Lint, format, type check and the
+**704 tests passing, 97% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
-installed** — which is what makes it a safety net rather than a souvenir.
+and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
+which is what makes that possible.
 
 **What works today:** a signal goes all the way to a decision. It is read from the
 price-action engine, normalised, given a deterministic identity, validated, given
-a stop and a take profit under an explicit policy, **sized** — the risk budget
-from the account balance and the configured percentage, the volume from the
-symbol's tick value and the broker's constraints — and turned into a
-`TradeDecision` carrying either a reason code or a fully sized intent. Every trade
-reports the reward:risk it *actually* has, not the one that was configured.
+a stop and a take profit under an explicit policy, **sized** from the account
+balance and the symbol's contract — both now readable from a real terminal — and
+turned into a `TradeDecision` carrying either a reason code or a fully sized
+intent.
 
-**What does not:** act on the decision. There is no executor wired into the
-pipeline, so a validated trade comes back as a dry run — every check passed,
-nothing sent, nothing could have been — and the account and symbol facts come
-from fakes until the MT5 data adapter of Phase 7 exists. A volume below the
-broker's minimum is refused rather than floored up, always.
+**What does not:** act on the decision. No executor is wired into the pipeline, so
+a validated trade comes back as a dry run. A volume below the broker's minimum is
+refused rather than floored up, always.
 
 ---
 
