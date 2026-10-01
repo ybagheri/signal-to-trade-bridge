@@ -763,6 +763,121 @@ nobody has thought about. `type` is mapped `"BUY" → LONG`, `"SELL" → SHORT`.
   Skipping under-counts, and an under-count admits a trade the concurrency gate
   should have refused.
 
+### 2.14 `ExecutionWorkflow` -- what the bridge calls, and what it does not
+
+**Written in Phase 7b by reading the source, not from the Phase 0 transcription.**
+The checkout is at `D:\Projects\auto-trade` and is installed editable, so
+`tests/unit/test_auto_trade_executor.py` now exercises the **real** workflow,
+the **real** `RiskEngine` and a real `DryRunTerminalAdapter`.
+
+The exact constructor, from `application/workflow.py:32-55`:
+
+``
+ExecutionWorkflow(
+    adapter: TradingTerminalAdapter,
+    risk_engine: RiskEngine,
+    profile: TerminalProfile,
+    policy: ExecutionPolicy,
+    kill_switch: KillSwitch,
+    audit: Callable[[AuditEvent], None],
+    now: Callable[[], datetime] | None = None,
+    ledger: ExecutionLedger | None = None,
+)
+``
+
+and `execute(signal: TradeSignal) -> ExecutionResult`.
+
+**Three things a caller must know and would otherwise get wrong.**
+
+1. **`execute` is *not* exception-free.** For expected failures it converts
+   exceptions into a result -- but around the click its `except Exception`
+   **re-raises** `ExecutionUnknownError`, so that one *escapes*. An adapter
+   that assumed a return would crash on exactly the outcome that most needs a
+   record. The bridge catches broadly and maps everything to `UNKNOWN`.
+2. **`profile` is required and never read.** The field appears once in the whole
+   class, in the assignment at line 46, and upstream's own tests pass
+   `type("Profile", (), {})()` -- an object with no attributes at all. The
+   bridge passes `SENTINEL_PROFILE` for the same reason, rather than fabricating
+   plausible-looking terminal attributes nobody has established.
+3. **There is no factory.** No `build_workflow`, no `create_workflow`. The only
+   assembly in upstream is two private CLI functions, `_dry_run_workflow` and
+   `_execute_live` in `cli/main.py`. So the bridge's composition root has to
+   build the workflow itself -- which is why `AutoTradeExecutor` takes an
+   already-assembled one and refuses to construct its own.
+
+### 2.14.1 The dry run has two independent guards
+
+Both are needed, and dropping either is a real hole:
+
+* **the workflow refuses to call `execute_order`** when `policy.dry_run` --
+  `workflow.py:102-110`, returning `DRY_RUN` / `DRY_RUN_COMPLETED` with the
+  message exactly `"validated; final execution control not used"`. The branch is
+  *after* `select_symbol` and `prepare_order`, so a dry run does exercise the
+  real order dialog up to the final control.
+* **the adapter closes the dialog** when the gate says dry-run --
+  `MT5DesktopAdapter.prepare_order` calls `window_manager.close_order_dialog()`
+  at `window_manager.py:644-645`.
+
+The CLI's dry-run path passes `ExecutionGate(enabled=False, dry_run=True)`
+regardless of configuration, so the opt-in is not even consulted. **The bridge
+keeps no way to reach either guard**, and a test fails if this repository's
+adapter module names `MT5DesktopAdapter` or `ExecutionGate` at all.
+
+### 2.14.2 The five gates `RiskEngine` applies, in order
+
+Refusal messages are fixed strings, so they are usable as assertions:
+`"duplicate signal id"`, `"symbol is not allowed"`, `"volume exceeds
+configured limit"`, `"signal is expired"`, `"order rate limit reached"`,
+`"account is not connected"`, `"maximum open positions reached"`.
+
+**There is no balance, no percentage and no monetary exposure check.**
+`max_open_positions` has no env var and no config wiring, and
+`AccountSnapshot.open_positions` is never populated by `auto-trade`'s own
+adapter, so **gate 7 is inert inside `auto-trade`.** It is not inert in the
+bridge: the bridge populates the same field from the terminal's published position
+snapshot, so `BRIDGE_MAX_OPEN_POSITIONS` is the enforced one. The bridge must
+treat a `RiskEngine` rejection as an expected outcome, not a fault.
+
+### 2.14.3 The six statuses, and why the sixth matters
+
+| Situation | Status | State |
+|---|---|---|
+| risk engine refused | `REJECTED` | `INVALID_SIGNAL` |
+| kill switch active | `REJECTED` | `INVALID_SIGNAL` |
+| `demo_only` and account not DEMO | `REJECTED` | `INVALID_SIGNAL` |
+| terminal not found | `REJECTED` | `TERMINAL_NOT_FOUND` |
+| UI/broker timeout | `REJECTED` | `TIMEOUT` |
+| broker rejection | `REJECTED` | `ORDER_REJECTED` |
+| gate refusal from the adapter | `REJECTED` | `GATE_REFUSED` |
+| **dry run** | `DRY_RUN` | `DRY_RUN_COMPLETED` |
+| verification did not prove a fill | `UNKNOWN` | `VERIFICATION_FAILED` |
+| `execute_order` raised after the click | `UNKNOWN` | `UNKNOWN_EXECUTION` *(raised, not returned)* |
+| verified single new matching position | `ACCEPTED` | `SUCCESS` |
+| position closed | `CLOSED` | `POSITION_CLOSED` -- **never by the workflow**, only by `close_position` |
+
+**`CLOSED` is mapped to `UNKNOWN`, and that is the load-bearing decision.**
+The bridge knows five statuses; upstream has six. A closed position means the order
+*was* placed and later closed, so re-sending is the duplicate rule 5 forbids --
+whereas `REJECTED` says "definitely not placed", which is a licence to retry. The
+bridge never closes, so this is a status it should never see; it is handled rather
+than ignored because a status arriving from nowhere is the signal that something
+upstream changed.
+
+### 2.14.4 Two fields that do not exist, and must not be invented
+
+* **No fill price.** `VerificationEvidence` carries `baseline`, `observed`
+  and `position_id` -- references to the snapshots it compared -- and nothing
+  else. A click is not a fill, so `execute_order` returns `REQUESTED`, never
+  `ACCEPTED`; only a verified single new matching position yields `ACCEPTED`.
+  So `ExecutionResult.executed_price` is always `None` in the bridge. Putting
+  the requested price there would be the most confident-looking fabrication in the
+  adapter.
+* **No `confidence` for an evidence score.** `TradeSignal.confidence` is
+  validated as `0..1` and downstream code would reasonably read it as a
+  probability. The bridge's `evidence_score` is explicitly *not* one. It travels
+  in `metadata` under its own name, so a field typed as a probability cannot
+  carry a score that is not one.
+
 
 ---
 
@@ -778,7 +893,7 @@ nobody has thought about. `type` is mapped `"BUY" → LONG`, `"SELL" → SHORT`.
 | Structural logging for decisions | Neither has a decision-level event stream (`auto-trade`'s `AuditLogger` is execution-scoped) |
 | Deterministic `signal_id` | `auto-trade`'s ledger is keyed on it, but nothing upstream produces one — the engine has no signal identity at all |
 
-**Two of these rows are now closed, and it is worth saying how:**
+**Three of these rows are now closed, and it is worth saying how:**
 
 * *Account balance* and *Symbol specification* are supplied by the bridge's own
   `adapters/mt5/` — Phase 7.
@@ -788,6 +903,15 @@ nobody has thought about. `type` is mapped `"BUY" → LONG`, `"SELL" → SHORT`.
   JSON, so the answer exists — see §2.13. The bridge reads it rather than adding
   `positions_get()`, because a published snapshot is readable without the Python
   bindings and does not depend on a call whose failure is easy to swallow.
+
+**And one thing that was never a gap but was nearly built as one:** there is no
+row for "an execution path", because `auto-trade` has always had one. What the
+bridge needed was not a second one — it was a way to reach the existing one
+*without skipping its safety envelope*. Calling `TradingTerminalAdapter` directly
+would have skipped the risk engine, the kill switch, the ledger, the state machine
+and the audit log, which is the failure this architecture exists to prevent. So the
+bridge wraps `ExecutionWorkflow` (§2.14) and a structural test fails if the
+adapter module can name the clicking class at all.
 
 ---
 

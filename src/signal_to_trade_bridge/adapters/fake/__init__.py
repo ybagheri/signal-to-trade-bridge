@@ -27,6 +27,7 @@ that broke them would leave the real adapter's hardest cases untested:
 """
 
 from signal_to_trade_bridge.adapters.fake.account import FakeAccountProvider
+from signal_to_trade_bridge.adapters.fake.executor import FakeTradeExecutor
 from signal_to_trade_bridge.adapters.fake.symbols import (
     FakeSymbolSpecProvider,
     eurusd_spec,
@@ -37,6 +38,7 @@ from signal_to_trade_bridge.adapters.fake.symbols import (
 __all__ = [
     "FakeAccountProvider",
     "FakeSymbolSpecProvider",
+    "FakeTradeExecutor",
     "eurusd_spec",
     "gold_spec",
     "unusual_spec",

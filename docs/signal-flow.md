@@ -41,7 +41,7 @@ Market data
     ↓
 [14] Dry run?  record, stop                                    Phase 8
     ↓
-[15] Execution                                               Phase 7
+[15] Execution                                               Phase 7  — IMPLEMENTED
     ↓
 MetaTrader 5 → broker
 ```
@@ -51,10 +51,18 @@ order by a single function.** `ProcessSignal.process(signal) -> TradeDecision`
 runs steps 3 to 12, stops at the first refusal, and returns either a `NO_TRADE`
 carrying a reason code or a `DRY_RUN` carrying a fully sized `TradeIntent`.
 
-It cannot place an order. There is no executor wired into it, so a passing trade
-comes back as `DRY_RUN` — "every check passed, nothing was sent, and nothing could
-have been". Phase 7 supplies the executor; Phase 8 makes the dry run report in
-full.
+It still cannot place an order, and the reason is now a deliberate one rather than
+an unfinished phase. `AutoTradeExecutor` exists and is tested against the execution
+project's real `ExecutionWorkflow`, but it is **not wired into step 15** yet:
+`test_this_module_holds_no_executor` asserts the pipeline imports no `TradeExecutor`,
+and it keeps passing on purpose. Execution arrives with the idempotency ledger
+(Phase 9) and the kill switch around it, not before — an executor on the pipeline with
+no ledger behind it is a second way to open a duplicate position, which is the one
+failure this architecture exists to prevent.
+
+So a passing trade still comes back as `DRY_RUN`: "every check passed, nothing was
+sent, and nothing could have been". Phase 8 makes that report say so in full; Phase 9
+brings the ledger that would let step 15 be reached at all.
 
 Two properties exist only at this level, and are what the pipeline tests are for:
 
