@@ -8,8 +8,14 @@ step 9 is the decision. Since Phase 6 a single function —
 the first refusal, and returns either a `NO_TRADE` carrying a reason code or a
 `DRY_RUN` carrying a fully sized `TradeIntent`.
 
-What remains unimplemented is everything *after* the decision: idempotency
-(Phase 9) and dry-run reporting (Phase 8). In tests the account and symbol facts
+What remains unimplemented is idempotency (Phase 9). Dry-run reporting arrived in
+Phase 8: `application/dry_run.py` now answers the question a dry run exists to
+answer - what exactly would this system do? - by building the request that *would*
+be sent, recording the arithmetic behind it, and asking `auto-trade`'s own risk
+engine what it would say. In tests the account and symbol facts come from
+`adapters/fake/`, which satisfies the same ports the terminal adapter drives; in
+production both the data adapter and the execution adapter are real, written in
+Phase 7.
 come from `adapters/fake/`, which satisfies the same ports the terminal adapter
 drives; in production both the data adapter and the execution adapter are real
 and written in Phase 7.
@@ -95,13 +101,48 @@ still act on.
 
 ### It cannot place an order
 
-A trade that passes every check comes back as `DRY_RUN`, not `EXECUTE`. There is
-no executor wired into the pipeline, so `EXECUTE` would be a lie — and calling it
-a dry run says exactly what happened: every check passed, nothing was sent, and
-nothing could have been. A test asserts the module imports no `TradeExecutor`,
-`IdempotencyStore` or `KillSwitch`, because an execution path that appears before
-Phase 7 would be one without the kill switch, the ledger and the audit log around
-it.
+A trade that passes every check comes back as `DRY_RUN`, not `EXECUTE` - and calling
+it a dry run says exactly what happened: every check passed, nothing was sent, and
+nothing could have been.
+
+**The executor exists; the pipeline still does not call it.** That is deliberate,
+and the test enforcing it is the point: `test_this_module_holds_no_executor` asserts
+the module imports no `TradeExecutor`, `IdempotencyStore` or `KillSwitch`, and it
+**keeps passing on purpose**. `EXECUTE` would be a lie until the ledger is behind it,
+because `BRIDGE_MAX_OPEN_POSITIONS` is only enforced when the open-position count can
+be read, and an unreadable count reports zero - which admits a trade. So execution
+arrives with the idempotency ledger (Phase 9) and the kill switch around it, not
+before: an executor on the pipeline with no ledger behind it is a second way to open
+a duplicate position, which is the one failure this architecture exists to prevent.
+
+### A second, independent refusal the dry run surfaces (Phase 8)
+
+A trade that passes every risk check in *this* project can still be refused by
+`auto-trade`'s own gates, because it has its own risk limits with its own defaults:
+
+| Gate | Owner | Default |
+|---|---|---|
+| allowed symbols | `auto-trade` | `EURUSD,XAUUSD,YM` |
+| maximum volume | `auto-trade` | `1.0` |
+| orders per minute | `auto-trade` | `5` |
+| signal expiry | `auto-trade` | `10` seconds |
+
+**These are complementary, not redundant.** This bridge's 0.5%-of-balance rule sizes
+a position from the account and caps nothing absolutely, so it will happily compute
+2.0 lots on a large balance - and `auto-trade` refuses anything over 1.0 regardless
+of how well sized it is. Likewise `GBPJPY` is admitted here and refused there.
+
+Before Phase 8 the only place that became visible was a `REJECTED` result on a live
+account, which is the worst possible moment to learn it. `application/dry_run.py`
+now asks `auto-trade`'s own `RiskEngine` - a pure function of the request - and the
+report names it as a blocker with the reason verbatim.
+
+**The verdict is a prediction, and it is marked as one.** `DownstreamVerdict` carries
+`evaluated`, because the real gates also depend on the account type, the kill switch,
+the ledger and the terminal window. When no engine is wired it reports
+`evaluated=False` and **never** `accepted=True`: an unevaluated gate reading as a pass
+would be the most expensive silence this project could produce, because it would
+report a green tick on the one gate that would have refused the trade.
 
 ---
 
@@ -578,7 +619,7 @@ record that could be edited after the fact would not be one.
 | A real account/symbol provider in tests | — | **Done.** `adapters/fake/` |
 | The account and spec in production | a terminal | Phase 7. `adapters/mt5/` |
 | Idempotency / duplicate protection | the ledger | Phase 9 |
-| Dry-run reporting | an executor-shaped record | Phase 8 |
+| Dry-run reporting | an executor-shaped record | **Done**, Phase 8. `application/dry_run.py`. |
 | Execution | `auto-trade`'s `ExecutionWorkflow` | **Built**, Phase 7. `adapters/auto_trade/`. Wired into the pipeline in Phase 9, with the ledger. |
 | Margin check | live account state | Not scheduled. Recorded as a known gap: a position can pass every check here and still be refused for margin at the broker. |
 

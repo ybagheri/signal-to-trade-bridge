@@ -1019,9 +1019,7 @@ class MarketDataProvider(Protocol):
 
 
 class AccountProvider(Protocol):
-    def balance(self) -> Decimal: ...
-    def equity(self) -> Decimal: ...
-    def currency(self) -> str: ...
+    def balance(self) -> AccountBalance: ...
 
 
 class SymbolSpecProvider(Protocol):
@@ -1035,12 +1033,72 @@ class TradeExecutor(Protocol):
 class IdempotencyStore(Protocol):
     def contains(self, key: str) -> bool: ...
     def record(self, key: str, record: Mapping[str, Any]) -> None: ...
+
+
+class KillSwitch(Protocol):
+    @property
+    def active(self) -> bool: ...
 ```
 
 Narrow by design. `AccountProvider` does not also return positions;
 `SymbolSpecProvider` does not also return quotes. Interface segregation matters
 most here, because these are the ports a test will fake, and a fat port means
 every fake must implement every method.
+
+**`AccountProvider` returns one `AccountBalance`, not three numbers.** The first
+draft of this document specified `balance()`, `equity()` and `currency()` as three
+methods. That is wrong in a way that only shows up in a failure: three calls cannot
+be one snapshot, so the equity that passed a margin check could be from a different
+moment than the balance it was compared against. `balance()` returning a single
+frozen `AccountBalance` makes a torn read unrepresentable rather than merely
+discouraged.
+
+### 5.10 The dry run — asking without sending
+
+Phase 8. `application/dry_run.py` turns a validated `TradeIntent` into the
+`ExecutionRequest` an executor would take, and reports in full why nothing was
+sent. It is the module closest to the line, and the thing it must never do is
+obvious enough to be worth stating structurally: **it holds no `TradeExecutor`.**
+
+The content of the phase is one disagreement made visible. This bridge validates
+against its own rules; `auto-trade` validates against its own rules again; and the
+two disagree by default:
+
+| Check | Owner | Default |
+|---|---|---|
+| risk per trade | this bridge | 0.5% of balance |
+| minimum volume | this bridge | refuse below broker minimum |
+| allowed symbols | `auto-trade` | `EURUSD,XAUUSD,YM` |
+| maximum volume | `auto-trade` | `1.0` |
+| orders per minute | `auto-trade` | `5` |
+
+So a signal on `GBPJPY` passes every check here and is refused downstream, and
+before this phase the only place that became visible was a `REJECTED` result on a
+live account. The dry run asks `auto-trade`'s own `RiskEngine` — a pure function
+of the request and the configured limits — and reports the answer.
+
+Three properties of that answer, each enforced:
+
+* **It is a prediction and the type says so.** `DownstreamVerdict` carries
+  `evaluated`, because the real gates also depend on the account type, the kill
+  switch, the ledger and the terminal window. An unevaluated gate reporting as
+  accepted is a **construction error**, not a normalisation.
+* **No engine wired means `evaluated=False`, never `accepted=True`.** A missing
+  package, a renamed class and a bug all look the same from here, and all three
+  mean the check did not happen. Reading that as a pass is the most expensive
+  possible silence.
+* **The report names every blocker, not the first.** An operator fixing them one at
+  a time, each revealing the next, is the slowest way to answer "can this trade
+  ever run here?".
+
+**One known gap, deliberately not worked around.** `ExecutionRequest.take_profit` is
+required while `TradeIntent.take_profit` is optional and `auto-trade`'s
+`TradeSignal.take_profit` is optional too. `TakeProfitSource.NONE` is a supported,
+documented, tested configuration, so this combination is reachable in production and
+currently cannot be expressed. The correct fix is to make the boundary field
+optional; refusing the trade would mean an operator who deliberately disabled
+targets gets everything refused at the last step with a message about a model. The
+refusal says exactly that, and **Phase 9 fixes the type** alongside the ledger.
 
 ---
 
@@ -1160,6 +1218,8 @@ cannot quietly relax one:
 7. **`UNKNOWN` execution is never auto-retried.**
 8. **The bridge's dry run short-circuits before the executor is called**, so
    `auto-trade` configuration cannot cause an order during a bridge dry run.
+   A dry run *asks* `auto-trade`'s risk engine what it would say and reports the
+   answer; it cannot send anything, which is asserted structurally (§5.10).
 9. **The bridge honours `FileKillSwitch` in its own decision path**, not only
    inside `auto-trade`.
 10. **The default configuration cannot execute.** `execution_enabled` defaults to

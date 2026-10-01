@@ -24,14 +24,14 @@ policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
 project that calls the others. Phase 7 built the **MT5 data adapter** and the
 **execution adapter** — the last things between the pipeline and a real order.
 
-**811 tests passing, 97% coverage.** Lint, format, type check and the
+**850 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite still runs **without `albrooks`**
 **or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
-Last completed phase: 7
-Current phase:        8 — dry run / simulation
-Next phase:           8 — report DRY_RUN from the real executor, not by default
+Last completed phase: 8
+Current phase:        9 — idempotency, and the ledger that unblocks execution
+Next phase:           9 — consult auto-trade's ledger before anything is sent
 ```
 
 ---
@@ -46,7 +46,7 @@ Next phase:           8 — report DRY_RUN from the real executor, not by defaul
 - [x] **Phase 5** — 1:1 risk/reward
 - [x] **Phase 6** — Trade validation pipeline
 - [x] **Phase 7** — MT5 data adapter and the `auto-trade` execution adapter, both **done**
-- [ ] Phase 8 — Dry run / simulation
+- [x] Phase 8 — Dry run reporting
 - [ ] Phase 9 — Idempotency / duplicate protection
 - [ ] Phase 10 — End-to-end integration
 - [ ] Phase 11 — MT5 / demo validation
@@ -329,6 +329,119 @@ construction cannot be built from doubles -- which made the mapping untestable o
 exactly the machine where it most needs testing. `verify()` is now explicit and
 `load_bindings()` calls it, so the guarantee holds on the path that matters and the
 suite stays runnable without the checkout.
+
+### What Phase 8 Built
+
+```
+application/
+  dry_run.py     DryRunReport, DownstreamVerdict
+                 build_execution_request(), report_for()
+adapters/auto_trade/
+  preflight.py   DownstreamLimits, ask_downstream_risk()
+tests/unit/
+  test_dry_run.py  39 tests
+```
+
+**Phase 6 made `DRY_RUN` an honest placeholder. This phase makes it an answer.**
+"Every check passed, nothing was sent, and nothing could have been" is true and it is
+not much use: a dry run exists to answer one question before real money is involved,
+and the question is *what exactly would this system do?*
+
+### The missing link, and it was genuinely missing
+
+`ExecutionRequest` — the type the executor accepts — was **never constructed anywhere
+in this repository** before this phase. The whole mapping from a sized intent to an
+order existed only as a hand-written fixture in the executor's tests. So the boundary
+the execution project is handed had no producer outside a test, and nothing in
+`src/` had ever exercised the numbers a real trade would carry.
+
+:func:`build_execution_request` is that producer, and it **copies every number rather
+than recomputing any**. A dry run that re-derived the volume or the stop would be a
+second sizing pass, and two passes that disagree produce a report describing an order
+the bridge would never send — which is worse than no report, because it looks
+authoritative.
+
+### The disagreement this phase was actually about
+
+The bridge validates against its own rules and `auto-trade` validates against its
+own rules again. **The two rulebooks disagree by default:**
+
+| Check | Owner | Default |
+|---|---|---|
+| risk per trade | this bridge | 0.5% of balance |
+| minimum volume | this bridge | refuse below broker minimum |
+| allowed symbols | `auto-trade` | `EURUSD,XAUUSD,YM` |
+| maximum volume | `auto-trade` | `1.0` |
+| orders per minute | `auto-trade` | `5` |
+
+So **a signal on `GBPJPY` passes every check in this bridge and is refused
+downstream.** Same for a 2.0-lot order, which the 0.5% rule will cheerfully compute on
+a large balance and `auto-trade`'s absolute cap will refuse however well sized it is.
+
+Before this phase the only place any of that became visible was a `REJECTED` result
+on a live account: in production, on real money, with the reason arriving as a
+downstream result rather than as a decision. The dry run now asks `auto-trade`'s own
+`RiskEngine` — a pure function of the request and the configured limits — and reports
+the answer as a blocker with the reason verbatim.
+
+### Three properties of that answer, each enforced by a test
+
+- **It is a prediction, and the type says so.** `DownstreamVerdict` carries
+  `evaluated`, because the real gates also depend on the account type, the kill
+  switch, the ledger and the terminal window. **An unevaluated gate reporting as
+  accepted is a construction error, not a normalisation** — `accepted=True` with
+  `evaluated=False` raises, because an unevaluated gate reporting as accepted is
+  indistinguishable downstream from one that ran and passed.
+- **No engine wired means `evaluated=False`, never `accepted=True`.** A missing
+  package, a renamed class and a bug all look identical from here, and all three mean
+  the check did not happen. That is the most expensive possible silence: a green tick
+  on the one gate that would have refused the trade.
+- **The report names every blocker, not the first.** An operator fixing them one at a
+  time, each fix revealing the next, is the slowest way to answer "can this trade ever
+  run here?".
+
+### What this module still may not do
+
+**It holds no `TradeExecutor`.** Not an import, not a type hint, not a call — and
+that is awkward, because an executor exists one package away and is perfectly usable.
+`test_this_module_holds_no_executor` asserts it, and so do three tests in
+`test_dry_run.py`: the dry run imports none, and `preflight.py` references neither
+the executor nor `MT5DesktopAdapter`, `ExecutionGate` or `ExecutionWorkflow`.
+
+The checks are over the AST rather than the raw source, because all four names appear
+in `preflight.py`'s own docstrings explaining precisely why it may not use them. A
+text search would fail on the documentation of the rule it enforces — and a structural
+test that fires on correct code gets deleted rather than fixed.
+
+`preflight.py` also constructs the `TradeSignal` itself rather than reaching through
+the executor for one. The duplication is deliberate (two tables, one test asserting
+they agree) because the alternative is inheriting the executor's ability to send.
+
+### One known gap, deliberately not worked around
+
+`ExecutionRequest.take_profit` is **required**; `TradeIntent.take_profit` is optional
+and so is `auto-trade`'s `TradeSignal.take_profit`. `TakeProfitSource.NONE` is a
+supported, documented, tested configuration, so **this combination is reachable in
+production and currently cannot be expressed.**
+
+Two options were considered. Making the boundary field optional is correct and is
+**Phase 9's work**; refusing the trade is the fail-closed direction but means an
+operator who deliberately disabled targets gets every trade refused at the last step
+with a message about a model. Rather than invent a second code path, the refusal
+names the gap and says which phase fixes it. The report still exists and still carries
+the arithmetic.
+
+### A bug this phase's own tests caught, and one they prevented
+
+`_ORDER_ACTIONS` in `preflight.py` was written as an **empty dict** on the first pass
+— the direction mapping the engine checks `symbol` and `volume` against would have
+been missing entirely. The type annotation was a `dict` so nothing complained, and the
+first test to run it failed. It is now populated, and
+`test_the_two_direction_tables_agree` keeps the two copies from drifting.
+
+The second is not a bug but a rule: the file's most important property is an
+*absence*, and the first draft of the structural test was a text search that would
+have failed on the correct code.
 
 ### What cannot be verified here at all
 
@@ -1335,7 +1448,7 @@ decide to trade and cannot yet trade.*
 
 ## Tests
 
-**816 collected, 811 passed, 5 skipped in about 4 seconds.** The suite runs
+**855 collected, 850 passed, 5 skipped in about 4 seconds.** The suite runs
 **without `albrooks` or `MetaTrader5` installed** and without a terminal — the
 MT5 adapter takes its bindings by injection, which is what makes that possible.
 
@@ -1350,6 +1463,7 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_validation.py` | 48 | The four validation layers, fail-closed behaviour. |
 | `unit/test_position_sizing.py` | 46 | The sizer, the three floor-up guards, and the conservative tick value. |
 | `unit/test_reward_risk_ratio.py` | 44 | The opt-in floor, the achieved-ratio reporting, one ratio implementation. |
+| `unit/test_dry_run.py` | 39 | **The dry run**: the two rulebooks disagreeing, and an unevaluated gate refusing to read as a pass. |
 | `unit/test_auto_trade_executor.py` | 50 | **The execution adapter**: the two-way mapping, and the real upstream workflow where it is installed. |
 | `unit/test_risk_service.py` | 35 | The wiring, the two reserved events, and the fakes as port implementations. |
 | `unit/test_configuration.py` | 33 | Defaults, overrides, fail-loudly behaviour, dotenv parsing, repr redaction. |
@@ -1362,7 +1476,7 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **816 collected, 811 passed, 5 skipped** | |
+| **Total** | **855 collected, 850 passed, 5 skipped** | |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1391,7 +1505,7 @@ The full gate, all clean:
 ruff check .            All checks passed!
 ruff format --check .   72 files already formatted
 mypy                    Success: no issues found in 37 source files
-pytest                  811 passed, 5 skipped
+pytest                  850 passed, 5 skipped
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -1560,13 +1674,21 @@ it.
 `IdempotencyStore` or `KillSwitch`, and **it should keep passing until the ledger
 does** — not merely until an executor exists.
 
-#### Phases 8–13
+#### Phase 8 — dry run reporting  ← **done**
 
-Phase 8 (dry run) makes `DRY_RUN_COMPLETED` a real report rather than the honest
-placeholder Phase 6 emits. Phase 9 (idempotency) is where the ledger from
-`auto-trade` gets consulted and the deterministic `signal_id` from Phase 2 earns
-its keep — and it must revisit that key against real engine output first. Phase 10
-is end-to-end; Phase 11 is the live demo, opt-in only; 12 and 13 as laid out.
+See *What Phase 8 Built* above. `application/dry_run.py` turns a validated intent
+into the request that *would* be sent and asks `auto-trade`'s own risk engine what
+it would say.
+
+#### Phases 9–13
+
+Phase 9 (idempotency) is where the ledger from `auto-trade` gets consulted and the
+deterministic `signal_id` from Phase 2 earns its keep — and it must revisit that key
+against real engine output first. **It also has to fix
+`ExecutionRequest.take_profit`**, which Phase 8 could not: that field is required
+while `TradeIntent`'s is optional, so `TakeProfitSource.NONE` — a supported,
+documented, tested policy — cannot currently be expressed. Phase 10 is end-to-end;
+Phase 11 is the live demo, opt-in only; 12 and 13 as laid out.
 
 ---
 
@@ -1996,7 +2118,7 @@ touched an adapter — and now partly relevant to Phase 7:
   so the adapter is verified against the thing it calls on every suite run rather
   than against a transcription of it.
 
-  811 tests, 97% coverage, every new file at 100%.
+  850 tests, 98% coverage, every new file at 100%.
 
   **One bug the tests caught in this phase's own code,** which is the argument for
   having written them: `load_bindings()` sat outside the `try` that turns a
@@ -2019,6 +2141,42 @@ touched an adapter — and now partly relevant to Phase 7:
 
 ---
 
+- **Phase 8** — dry run reporting. `application/dry_run.py`, plus
+  `adapters/auto_trade/preflight.py`. 39 tests.
+
+  **The content of the phase is one disagreement made visible.** This bridge
+  validates against its own rules and `auto-trade` validates against its own rules
+  again, and the two disagree by default: its allow-list is `EURUSD,XAUUSD,YM` with a
+  1.0 volume cap, while this project's come from the operator's configuration. **A
+  signal on `GBPJPY` passes every check here and is refused downstream** — and the
+  only place that used to become visible was a `REJECTED` result on a live account.
+  The dry run now asks `auto-trade`'s own `RiskEngine`, which is a pure function of
+  the request, and reports the answer as a blocker with the reason verbatim.
+
+  **A prediction is marked as one.** `DownstreamVerdict` carries `evaluated`, because
+  the real gates also depend on the account type, the kill switch, the ledger and the
+  terminal window. With no engine wired it reports `evaluated=False` and **never**
+  `accepted=True`; `accepted=True` with `evaluated=False` raises, because those two
+  are indistinguishable downstream and only one of them is true.
+
+  **`ExecutionRequest` had no producer.** The type the executor accepts was never
+  constructed anywhere in `src/` before this phase — the whole mapping existed only as
+  a hand-written test fixture. `build_execution_request` is that producer, and it
+  copies every number rather than recomputing any: a dry run that re-derived the volume
+  would be a second sizing pass, and two passes that disagree describe an order the
+  bridge would never send.
+
+  **A gap left open on purpose.** `ExecutionRequest.take_profit` is required while
+  `TradeIntent`'s is optional, so `TakeProfitSource.NONE` — supported, documented,
+  tested — cannot be expressed. Phase 9 fixes the type alongside the ledger.
+
+  Still no `TradeExecutor` anywhere in the pipeline. The tests enforcing that check
+  the AST rather than the source text, because all four forbidden names appear in
+  `preflight.py`'s docstrings explaining why it may not use them.
+
+  850 tests, 98% coverage, both new files at 100%.
+
+
 ## How To Continue
 
 **Before doing anything else:**
@@ -2027,7 +2185,7 @@ touched an adapter — and now partly relevant to Phase 7:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **811 tests should pass, 5 skipped.** If
+   virtual environment is not set up. **850 tests should pass, 5 skipped.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
