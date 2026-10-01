@@ -7,7 +7,8 @@ engine and an automated trading execution system, with explicit risk management,
 a default risk of **0.5% of account balance per trade**, and a default
 **1:1 risk/reward**.
 
-> **Status: Phase 0 complete — architecture audit.** No trading code exists yet.
+> **Status: Phase 7 half done — the MT5 data adapter.** No order has been placed
+> and no terminal has been opened.
 > See [HANDOFF.md](HANDOFF.md) for exactly where the project stands and
 > [docs/architecture.md](docs/architecture.md) for the design this audit produced.
 
@@ -219,4 +220,5 @@ then fix the handoff document.
 
 ## License
 
-Proprietary. See the repository owner for terms.
+MIT for this project's own source — see [LICENSE](LICENSE). The two upstream
+projects are private repositories and are not covered by it.
