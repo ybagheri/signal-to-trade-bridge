@@ -39,7 +39,7 @@ Market data
     ↓
 [13] Idempotency                                               Phase 9
     ↓
-[14] Dry run?  record, stop                                    Phase 8
+[14] Dry run?  record, stop                          Phase 8  ← IMPLEMENTED
     ↓
 [15] Execution                                               Phase 7  — IMPLEMENTED
     ↓
@@ -61,8 +61,36 @@ no ledger behind it is a second way to open a duplicate position, which is the o
 failure this architecture exists to prevent.
 
 So a passing trade still comes back as `DRY_RUN`: "every check passed, nothing was
-sent, and nothing could have been". Phase 8 makes that report say so in full; Phase 9
-brings the ledger that would let step 15 be reached at all.
+sent, and nothing could have been".
+
+**Since Phase 8, that report is in full.** `application/dry_run.py` turns the
+validated intent into the `ExecutionRequest` that *would* be sent, and answers the
+question a dry run exists to answer before real money is involved: what exactly
+would this system do?
+
+```
+DRY_RUN
+  request          the order: volume, entry, stop, target, comment, strategy
+  arithmetic       the sizing behind it, and the balance it came from
+  downstream       what auto-trade's own risk gates would say
+  blockers         everything standing between here and a placed order
+```
+
+**The `downstream` row is the part that was invisible before.** This bridge
+validates against its own rules and `auto-trade` validates against its own rules
+again, and the two rulebooks disagree by default: its default allow-list is
+`EURUSD,XAUUSD,YM` with a 1.0 volume cap, while this bridge's limits come from the
+operator's configuration. **A signal on `GBPJPY` passes every check here and is
+refused downstream** — and until this phase the only place that became visible was a
+`REJECTED` result on a live account. The dry run now asks `auto-trade`'s own
+`RiskEngine`, which is a pure function of the request, and reports the answer.
+
+It is a **prediction, and the report says so**: the real gates also depend on the
+account type, the kill switch, the ledger and the terminal window. When no engine is
+wired the verdict is `evaluated=False`, never `accepted=True` — an unevaluated gate
+that reads as a pass is the specific silence this phase exists to prevent.
+
+**Phase 9 brings the ledger that would let step 15 be reached at all.**
 
 Two properties exist only at this level, and are what the pipeline tests are for:
 
