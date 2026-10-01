@@ -61,6 +61,13 @@ SIGNAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 SOURCE = "signal-to-trade-bridge"
 
+#: The instant every test in this class pretends it is. Pinned because upstream
+#: risk-checks a signal's expiry against a clock: a test using the real one would
+#: be correct today and wrong the day the fixture date passed it. Found by the
+#: test that drives the real workflow, where every signal came back as
+#: ``signal is expired`` for exactly this reason.
+NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+
 
 # --- doubles shaped like the upstream classes ---------------------------------
 
@@ -220,7 +227,7 @@ def _executor(workflow: FakeWorkflow | None = None, **kwargs: object) -> AutoTra
     return AutoTradeExecutor(
         workflow or FakeWorkflow(),
         bindings=_bindings(),
-        now=lambda: datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
+        now=lambda: NOW,
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -733,6 +740,16 @@ class TestTheRealPackageIfItIsInstalled:
             kill_switch=bindings.KillSwitch(),  # type: ignore[attr-defined]
             audit=lambda event: None,
             ledger=JsonExecutionLedger(ledger_path),
+            # `now` is required for a test to be deterministic. Upstream's risk
+            # engine compares the signal's expiration against the wall clock, so a
+            # workflow built without one judges the injected-clock signal from
+            # 2026-10-01 against today's date and refuses it as expired.
+            #
+            # Found by this file, and it is a composition-root fact rather than an
+            # adapter bug: `now` is one of the eight constructor arguments and the
+            # adapter deliberately does not build the workflow, so wiring it is
+            # whoever wires it.
+            now=lambda: NOW,
         )
 
     def _bindings_or_skip(self) -> object:
@@ -745,7 +762,7 @@ class TestTheRealPackageIfItIsInstalled:
         executor = AutoTradeExecutor(
             self._workflow(bindings, tmp_path / "idempotency.json"),
             bindings=bindings,  # type: ignore[arg-type]
-            now=lambda: datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
+            now=lambda: NOW,
         )
         # Volume 0.10 is the limit, not over it: the real RiskEngine refuses
         # anything larger, and that refusal is asserted separately below rather than
@@ -764,6 +781,7 @@ class TestTheRealPackageIfItIsInstalled:
         executor = AutoTradeExecutor(
             self._workflow(bindings, tmp_path / "idempotency.json"),
             bindings=bindings,  # type: ignore[arg-type]
+            now=lambda: NOW,
         )
         result = executor.submit(_request(volume=Decimal("0.12")))
         assert result.is_rejected
@@ -777,6 +795,7 @@ class TestTheRealPackageIfItIsInstalled:
         executor = AutoTradeExecutor(
             self._workflow(bindings, tmp_path / "idempotency.json"),
             bindings=bindings,  # type: ignore[arg-type]
+            now=lambda: NOW,
         )
         first = executor.submit(_request(volume=Decimal("0.10")))
         second = executor.submit(_request(volume=Decimal("0.10")))

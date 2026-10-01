@@ -176,7 +176,10 @@ class TestTheHappyPath:
         # computed from the distances used rather than copied from configuration.
         pipeline, _, _ = _pipeline()
         decision = pipeline.process(_signal())
-        assert decision.diagnostics["reward_to_risk"] == "1"
+        # Nested under `report` since Phase 9: the dry-run report is a structure,
+        # and flattening it back into `diagnostics` would put two `symbol`-shaped
+        # fields side by side with nothing saying which belongs to the order.
+        assert decision.diagnostics["report"]["arithmetic"]["reward_to_risk"] == "1"
 
     def test_a_gold_signal_is_sized_on_its_own_contract(self) -> None:
         # The same $50 budget, a completely different instrument. Proves the
@@ -609,33 +612,41 @@ class TestItCannotPlaceAnOrder:
         decision = pipeline.process(_signal())
         assert decision.execution is None
 
-    def test_this_module_holds_no_executor(self) -> None:
-        # Structural rather than behavioural. An execution path that appears here
-        # before Phase 7 would be one without the kill switch, the idempotency
-        # ledger and the audit log around it -- which is the failure the whole
-        # architecture was drawn to prevent. So the constraint is asserted on the
-        # source, not left to review.
-        import ast
+    def test_the_execution_envelope_is_the_only_way_to_reach_an_executor(self) -> None:
+        # This replaced `test_this_module_holds_no_executor`, which read this
+        # module's source and failed on any import of `TradeExecutor`. That test did
+        # its job for three phases -- but an absence cannot also authorise. It could
+        # forbid the mistake and say nothing about whether the right thing was in
+        # place, so Phase 9 could not say "yes, and here is why that is safe".
+        #
+        # The rule it enforced is now a type: `ExecutionEnvelope` has no public
+        # constructor, so there is no way to hand this class an executor without the
+        # idempotency ledger and the kill switch beside it.
         import inspect
 
         from signal_to_trade_bridge.application import process_signal as module
 
-        tree = ast.parse(inspect.getsource(module))
-        forbidden = {"TradeExecutor", "IdempotencyStore", "KillSwitch"}
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.Import):
-                names = [alias.name.split(".")[-1] for alias in node.names]
-            for name in names:
-                assert name not in forbidden, (
-                    f"process_signal.py imports {name!r}. Execution belongs to Phase 7, where "
-                    f"the kill switch, the idempotency ledger and the audit log come with it."
-                )
+        signature = inspect.signature(module.ProcessSignal.wire_execution)
+        assert list(signature.parameters) == ["self", "envelope"]
 
+    def test_an_unwired_pipeline_cannot_execute(self) -> None:
+        pipeline, _, _ = _pipeline()
+        assert pipeline.can_execute is False
+        decision = pipeline.process(_signal())
+        assert decision.action is DecisionAction.DRY_RUN
+        assert decision.execution is None
 
-class TestDeterminism:
+    def test_wiring_without_execution_enabled_still_does_not_send(self) -> None:
+        # The envelope is present, so the ledger and the kill switch are too, and
+        # the default configuration still refuses. Enabling the envelope is not
+        # enabling execution -- they are separate acts, and conflating them is how a
+        # dry run becomes a live one without anybody deciding to.
+
+        pipeline, _, executor = _pipeline()
+        pipeline.wire_execution(_envelope(executor))
+        assert pipeline.can_execute is False
+        assert pipeline.process(_signal()).action is DecisionAction.DRY_RUN
+
     def test_the_same_signal_produces_the_same_decision(self, _logs: StringIO) -> None:
         # Phase 9's idempotency ledger depends on this and cannot provide it: the
         # ledger needs to recognise a re-delivery, which means the decision must
@@ -656,3 +667,29 @@ class TestDeterminism:
         pipeline.process(signal)
         pipeline.process(signal)
         assert signal.to_dict() == before
+
+
+def _envelope(executor: object, **overrides: object):
+    """A real `ExecutionEnvelope` over fakes, for the pipeline's wiring tests."""
+    from signal_to_trade_bridge.application.execution_envelope import (
+        build_execution_envelope,
+    )
+
+    class _Store:
+        def __init__(self) -> None:
+            self.records: dict[str, dict[str, object]] = {}
+
+        def contains(self, key: str) -> bool:
+            return key in self.records
+
+        def record_attempt(self, key: str, execution_id: str) -> None:
+            self.records.setdefault(key, {"execution_id": execution_id})
+
+        def record_outcome(self, key: str, execution_id: str, outcome) -> None:
+            self.records[key] = {"execution_id": execution_id, **dict(outcome)}
+
+    class _Switch:
+        active = False
+
+    kwargs = {"idempotency": _Store(), "kill_switch": _Switch(), **overrides}
+    return build_execution_envelope(executor, **kwargs)  # type: ignore[arg-type]

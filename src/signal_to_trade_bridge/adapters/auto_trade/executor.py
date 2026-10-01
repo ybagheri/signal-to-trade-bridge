@@ -66,7 +66,7 @@ the structural test asserting it is the enforcement.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from signal_to_trade_bridge.adapters.auto_trade.bindings import (
@@ -195,9 +195,17 @@ class AutoTradeExecutor:
         metadata["bridge_evidence_score"] = request.evidence_score
         metadata["bridge_dry_run"] = False
 
+        # Read once. The clock is injectable, so a test pinning it is fine, but
+        # calling `_now()` twice would produce a signal whose timestamp and whose
+        # audit moment differ -- and with upstream's 10-second default expiry, a
+        # clock that straddles that boundary can report a signal as expired before
+        # it was ever seen. Found by the test that drives the *real* workflow: an
+        # injected clock of a fixed past date made every signal look stale.
+        now = self._now()
+
         return bindings.TradeSignal(
             signal_id=request.signal_id,
-            timestamp=self._now(),
+            timestamp=now,
             source=_SOURCE,
             symbol=request.symbol,
             action=action,
@@ -208,7 +216,14 @@ class AutoTradeExecutor:
             comment=request.comment,
             strategy=request.strategy,
             # confidence is deliberately unset -- see the module docstring.
-            expiration=None,
+            #
+            # `expiration` is set from the clock rather than left to upstream's
+            # default of `timestamp + 10s`. Both are "now + a window", but the
+            # default is measured from a *stamped* time that an injected clock may
+            # have set in the past, so a test pinning the clock saw every signal
+            # reported as expired. Setting it here makes the window mean what it
+            # says: from the moment this adapter ran.
+            expiration=now + _DEFAULT_EXPIRY,
             metadata=metadata,
         )
 
@@ -285,6 +300,14 @@ def _order_action(direction: Direction) -> str:
 #: an audit record that names its producer is the difference between a log that
 #: can be correlated and one that has to be guessed at.
 _SOURCE = "signal-to-trade-bridge"
+
+#: How long the built signal stays valid. Upstream's own default for
+#: ``RiskLimits.expiration_seconds``, restated here because this adapter sets
+#: ``expiration`` explicitly rather than letting a *stamped* timestamp decide --
+#: see ``_to_signal``. Not a configuration key: it is upstream's, and a bridge
+#: that invented a different window would silently widen or narrow a safety limit
+#: it does not own.
+_DEFAULT_EXPIRY = timedelta(seconds=10)
 
 
 def _STATUS_MAP(raw: str, bindings: AutoTradeBindings) -> tuple[str, str | None]:

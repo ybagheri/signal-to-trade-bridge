@@ -115,6 +115,45 @@ arrives with the idempotency ledger (Phase 9) and the kill switch around it, not
 before: an executor on the pipeline with no ledger behind it is a second way to open
 a duplicate position, which is the one failure this architecture exists to prevent.
 
+### Two things that look contradictory, and are (Phase 9)
+
+**`ExecutionResult.is_retryable` says a clean rejection may be resent.
+The idempotency ledger says the same signal id is never offered again.**
+
+Both are correct and neither is going to change. They describe different moments:
+
+| | Question it answers |
+|---|---|
+| `is_retryable` | what may a caller do with a result **it already holds**? |
+| `IdempotencyStore.contains` | what would a **new attempt** meet? |
+
+A clean `REJECTED` was recorded, so the key is present, so a second attempt is
+refused with `"duplicate signal id"` — upstream's own wording, which is why
+`RejectionReason.DUPLICATE_SIGNAL` uses that vocabulary and the two projects now
+agree about *why*.
+
+An operator who retries on `is_retryable` alone will be refused. That is written
+down here, in the port's docstring and in `HANDOFF.md` rather than left to be
+discovered, because a refusal that looks arbitrary is worse than one that is
+explained.
+
+**And the key itself can collapse two trades into one.** `compute_signal_id` is a
+hash of `(symbol, timeframe, bar_index, bar_time, action, direction, setup_id)`, and
+the bar is the unit of identity. But the mapper falls back to `bar_index=-1` and
+`bar_time=None` when the engine reports neither — and `Signal.bar_index` **defaults
+to `-1` on the model**, so the mapper's fallback and the model's default agree. A
+signal carrying both fallbacks produces a key with **no bar in it**, and two of them
+hash alike, so the second is refused as a duplicate even though it is a different
+trade.
+
+The blast radius is bounded and the tests say by how much: different symbols do not
+collide, different setups do not collide, and either `bar_index` **or** `bar_time`
+alone is enough to separate. It takes both being absent.
+
+**The fix is to refuse such a signal**, not to invent a substitute key — refusing is
+fail-closed and needs no new identity scheme. It belongs in Phase 10, where a
+composition root can see where the signal came from.
+
 ### A second, independent refusal the dry run surfaces (Phase 8)
 
 A trade that passes every risk check in *this* project can still be refused by

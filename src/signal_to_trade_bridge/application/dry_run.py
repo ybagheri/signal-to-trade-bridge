@@ -91,38 +91,19 @@ def build_execution_request(intent: TradeIntent) -> ExecutionRequest:
 
     **The numbers are copied, not recomputed.** ``volume`` is the intent's sized
     volume, ``entry`` its entry, ``stop_loss`` the resolved price and ``take_profit``
-    the target price. A dry run that re-derived any of them would be a second sizing
-    pass, and two sizing passes that disagree produce a report describing an order
-    the bridge would never actually send — which is worse than no report, because
-    it looks authoritative.
+    the target price or ``None``. A dry run that re-derived any of them would be a
+    second sizing pass, and two sizing passes that disagree produce a report
+    describing an order the bridge would never actually send -- which is worse than
+    no report, because it looks authoritative.
 
-    :raises ValueError: when the intent has no take profit, because
-        :class:`~domain.models.ExecutionRequest` requires one. That combination is
-        reachable in production — ``TakeProfitSource.NONE`` is a supported,
-        documented, tested policy — and it is a **known gap, not a crash to be
-        papered over**. Two options were considered:
-
-        * make ``ExecutionRequest.take_profit`` optional, matching
-          ``TradeIntent.take_profit`` and ``auto-trade``'s own ``TradeSignal``, where
-          both are ``None``-able;
-        * refuse the trade here.
-
-        The first is correct and **is Phase 9's work**, together with the ledger.
-        Refusing is the fail-closed direction and costs nothing meanwhile, but it
-        means an operator who deliberately disabled targets gets every trade
-        refused at the last step with a message about a model. Rather than
-        invent a second code path now, the refusal says exactly that.
+    ``take_profit=None`` is the ``TakeProfitSource.NONE`` policy -- exits managed
+    elsewhere -- and it is passed through as absent rather than refused. Phase 8
+    raised here instead, because ``ExecutionRequest.take_profit`` was required while
+    this project's own ``TradeIntent.take_profit`` and ``auto-trade``'s
+    ``TradeSignal.take_profit`` are both optional. **Phase 9 made the field
+    optional**, and this function had no branch to remove: the same expression
+    serves both cases.
     """
-    if intent.take_profit is None:
-        raise ValueError(
-            "this intent has no take profit, and ExecutionRequest requires one. "
-            "TakeProfitSource.NONE is a supported configuration, so this is a known gap "
-            "in the boundary type rather than a bad signal: ExecutionRequest.take_profit "
-            "must be made optional to match TradeIntent and auto-trade's TradeSignal. "
-            "Recorded for Phase 9, which is where the boundary type gets fixed alongside "
-            "the ledger."
-        )
-
     return ExecutionRequest(
         signal_id=intent.signal.signal_id,
         symbol=intent.symbol,
@@ -130,7 +111,7 @@ def build_execution_request(intent: TradeIntent) -> ExecutionRequest:
         volume=intent.volume,
         entry=intent.entry,
         stop_loss=intent.stop_loss.price,
-        take_profit=intent.take_profit.price,
+        take_profit=None if intent.take_profit is None else intent.take_profit.price,
         comment=default_comment(intent),
         strategy=intent.signal.setup_id or "",
         # Carried for traceability and explicitly not a probability. See
@@ -340,30 +321,22 @@ def report_for(
         The signature takes the request rather than the intent so a caller cannot
         accidentally check the downstream gates against something other than the
         order it is about to describe.
-    """
-    request: ExecutionRequest | None
-    try:
-        request = build_execution_request(intent)
-    except ValueError as exc:
-        # Recorded, not raised: the report is more useful with the rest of the
-        # arithmetic than not. `blockers()` names it, so it cannot be missed.
-        request = None
-        request_error = str(exc)
-    else:
-        request_error = ""
 
-    if request is None:
-        downstream = DownstreamVerdict.not_evaluated("there is no execution request to ask about")
-    elif ask_downstream is None:
+    ``request`` is not optional any more. It was, in Phase 8, because
+    ``ExecutionRequest`` required a take profit and an intent under
+    ``TakeProfitSource.NONE`` had none; Phase 9 made the field optional, so every
+    validated intent now produces a request. The field stays nullable on
+    :class:`DryRunReport` because a caller holding a hand-built report should not
+    have to prove it is well-formed, but a report built here always has one.
+    """
+    request = build_execution_request(intent)
+
+    if ask_downstream is None:
         downstream = DownstreamVerdict.not_evaluated(
             "no downstream risk engine is wired into this dry run"
         )
     else:
         downstream = ask_downstream(request)
-
-    payload = dict(extra or {})
-    if request_error:
-        payload["request_error"] = request_error
 
     return DryRunReport(
         request=request,
@@ -378,7 +351,7 @@ def report_for(
         currency=intent.account_balance.currency,
         contract_size=getattr(intent.symbol_spec, "contract_size", None),
         symbol_spec_source=getattr(intent.symbol_spec, "source", "") or "",
-        extra=payload,
+        extra=dict(extra or {}),
     )
 
 

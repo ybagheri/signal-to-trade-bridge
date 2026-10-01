@@ -1032,18 +1032,28 @@ class TradeExecutor(Protocol):
 
 class IdempotencyStore(Protocol):
     def contains(self, key: str) -> bool: ...
-    def record(self, key: str, record: Mapping[str, Any]) -> None: ...
+    def record_attempt(self, key: str, execution_id: str) -> None: ...
+    def record_outcome(self, key: str, execution_id: str,
+                        outcome: Mapping[str, Any]) -> None: ...
 
 
 class KillSwitch(Protocol):
     @property
     def active(self) -> bool: ...
-```
 
 Narrow by design. `AccountProvider` does not also return positions;
 `SymbolSpecProvider` does not also return quotes. Interface segregation matters
 most here, because these are the ports a test will fake, and a fat port means
 every fake must implement every method.
+
+**`IdempotencyStore` records in two phases, not one, and this was Phase 9.** It
+was `record(key, mapping)`, which cannot express what the real ledger does: upstream
+writes `REQUESTED` **before** the click and the outcome **after** it, and that gap is
+the mechanism. A single call collapses the two moments, and the collapse is invisible
+until the first crash — at which point the ledger says the signal was never attempted
+and the trade is free to repeat. `execution_id` ties the halves together and is
+required on both; the ledger refuses an outcome whose id does not match, so a second
+attempt cannot take over the first one's record.
 
 **`AccountProvider` returns one `AccountBalance`, not three numbers.** The first
 draft of this document specified `balance()`, `equity()` and `currency()` as three
@@ -1101,6 +1111,48 @@ targets gets everything refused at the last step with a message about a model. T
 refusal says exactly that, and **Phase 9 fixes the type** alongside the ledger.
 
 ---
+
+
+### 5.11 The execution envelope — an absence, promoted to a type
+
+Phase 9. For three phases the rule was "the pipeline must not import an executor",
+enforced by a test that read `process_signal.py`'s source and failed on the import.
+That test did its job — and it had to be retired, because **an absence cannot also
+authorise.** It could forbid the mistake and say nothing about whether the right
+thing was in place, so the moment wiring became possible there was no way to say
+"yes, and here is why that is safe".
+
+Three optional constructor arguments would not have helped. Every combination of an
+executor, a ledger and a kill switch is constructible, and each wrong one is a way
+to place a real order without the record of it or the switch that stops it.
+
+So they arrive together, in a type with **no public constructor**:
+
+```python
+class ExecutionEnvelope:
+    def __init__(self, executor=None, **_):
+        raise TypeError(...)   # fields set only by build_execution_envelope(...)
+```
+
+`ProcessSignal.wire_execution` takes the envelope and nothing else, so there is no
+way to hand the pipeline an executor without the other two. Four refusals in the
+factory, and the one worth naming: **the same object passed as two collaborators is
+refused.** A stub satisfying both the executor and the ledger would pass "all three
+present" while recording nothing and stopping nothing — worse than an obviously
+incomplete envelope, because it looks complete.
+
+It is a plain class rather than a frozen dataclass, and the reason is worth recording:
+`slots=True` cannot be combined with `object.__new__` plus `object.__setattr__`,
+which is how the fields get set. A frozen dataclass could have given the immutability
+but not the refusal, and the refusal is the point.
+
+**An envelope makes sending accountable, not safe.** The audit log is not among the
+three because it lives inside the `ExecutionWorkflow` the executor already wraps — a
+separate sink would be a second source of truth about what was placed. And whether a
+*given configuration* may use the envelope at all is the composition root's refusal,
+not this type's: that is a decision about a machine and an operator rather than about
+a trade.
+
 
 ## 6. Anti-corruption layer
 

@@ -213,10 +213,17 @@ class RejectionReason(StrEnum):
     EVIDENCE_BELOW_MINIMUM = "EVIDENCE_BELOW_MINIMUM"
     SPREAD_TOO_WIDE = "SPREAD_TOO_WIDE"
     SYMBOL_NOT_TRADEABLE = "SYMBOL_NOT_TRADEABLE"
+
     SYMBOL_NOT_ALLOWED = "SYMBOL_NOT_ALLOWED"
 
     # -- idempotency and safety ------------------------------------------
+    #: This signal id is already in the idempotency ledger. Phase 9 made this
+    #: reachable from the pipeline; the same vocabulary upstream uses
+    #: ("duplicate signal id"), so the bridge and the execution project now agree
+    #: about *why* rather than one permitting what the other forbids.
     DUPLICATE_SIGNAL = "DUPLICATE_SIGNAL"
+    #: A deliberate stop, not a fault. Its own code because an operator reading a
+    #: log needs to tell "we chose not to" from "we could not".
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
     EXECUTION_DISABLED = "EXECUTION_DISABLED"
     MAX_CONCURRENT_POSITIONS = "MAX_CONCURRENT_POSITIONS"

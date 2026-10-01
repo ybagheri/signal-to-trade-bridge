@@ -913,6 +913,19 @@ class ExecutionRequest:
 
     A narrow, explicit boundary type rather than the intent itself, so the
     executor cannot reach back into the sizing arithmetic and second-guess it.
+
+    ``take_profit`` is optional, and it was not always. It was required until
+    Phase 9, which made this class **unconstructible** under
+    ``TakeProfitSource.NONE`` -- the same bug Phase 5 had already found and fixed
+    one class higher up. ``TradeIntent.take_profit`` is optional and
+    ``auto-trade``'s own ``TradeSignal.take_profit`` is optional, so a required
+    field here was a third opinion nobody had asked for.
+
+    Phase 8 found the consequence: an operator who deliberately manages exits
+    elsewhere got every trade refused at the very last step, with a message about
+    a model rather than about exits. **A model that cannot represent a supported
+    configuration is a bug that waits to be misdiagnosed**, and it had waited two
+    phases.
     """
 
     signal_id: str
@@ -921,7 +934,7 @@ class ExecutionRequest:
     volume: Decimal
     entry: Decimal
     stop_loss: Decimal
-    take_profit: Decimal
+    take_profit: Decimal | None = None
     comment: str = ""
     #: The upstream candidate identifier, forwarded so the execution project's
     #: audit log can name the detector that caused the trade.
@@ -945,7 +958,11 @@ class ExecutionRequest:
         _positive(self.volume, "volume")
         _positive(self.entry, "entry")
         _positive(self.stop_loss, "stop_loss")
-        _positive(self.take_profit, "take_profit")
+        if self.take_profit is not None:
+            # Absent is allowed -- exits managed elsewhere is a supported policy --
+            # but a take profit that is *present* and non-positive is not a target,
+            # and it is refused here rather than passed to a broker that would.
+            _positive(self.take_profit, "take_profit")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -955,7 +972,7 @@ class ExecutionRequest:
             "volume": str(self.volume),
             "entry": str(self.entry),
             "stop_loss": str(self.stop_loss),
-            "take_profit": str(self.take_profit),
+            "take_profit": None if self.take_profit is None else str(self.take_profit),
             "comment": self.comment,
             "strategy": self.strategy,
             "evidence_score": self.evidence_score,

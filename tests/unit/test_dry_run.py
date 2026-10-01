@@ -343,24 +343,45 @@ class TestBuildingTheRequest:
         intent = _intent()
         assert build_execution_request(intent).strategy == intent.signal.setup_id
 
-    def test_an_intent_without_a_take_profit_is_a_named_gap_not_a_crash(self) -> None:
-        # Reachable in production: TakeProfitSource.NONE is a supported, documented,
-        # tested configuration. `ExecutionRequest.take_profit` is required, so this
-        # combination genuinely cannot be expressed -- and the right answer is to
-        # say so precisely rather than to invent a second code path or refuse every
-        # such trade with a message about a model.
-        intent = _intent(take_profit=None)
-        report = report_for(intent, execution_enabled=False, dry_run=True)
+    def test_an_intent_without_a_take_profit_produces_a_request(self) -> None:
+        # Phase 8 raised here, because ExecutionRequest.take_profit was required
+        # while this project's TradeIntent and auto-trade's TradeSignal both have it
+        # optional. Phase 9 made the field optional, so the NONE policy now flows
+        # through with nothing special done for it.
+        request = build_execution_request(_intent(take_profit=None))
+        assert request.take_profit is None
+        assert request.stop_loss is not None
 
-        assert report.request is None
-        assert any("execution request" in b for b in report.blockers())
-        assert "Phase 9" in report.to_dict()["request_error"]
-
-    def test_the_report_survives_an_unbuildable_request(self) -> None:
-        # Recorded, not raised: the arithmetic is still worth reading.
+    def test_a_report_for_an_intent_without_a_take_profit_is_still_complete(self) -> None:
+        # The arithmetic, the balance it came from and the blockers are all still
+        # reported. The alternative -- refusing the whole report -- would leave an
+        # operator who deliberately disabled targets with no dry run at all.
         report = report_for(_intent(take_profit=None), execution_enabled=False, dry_run=True)
+        assert report.request is not None
+        assert report.request.take_profit is None
         assert report.volume == Decimal("0.12")
-        assert report.downstream.evaluated is False
+        assert report.balance == Decimal("10000.00")
+
+    def test_a_request_without_a_take_profit_serialises_as_absent(self) -> None:
+        # Not as the string "None", which is what str() on a missing value would
+        # give and what a broker would then try to use as a price.
+        payload = build_execution_request(_intent(take_profit=None)).to_dict()
+        assert payload["take_profit"] is None
+
+    def test_a_take_profit_that_is_present_must_still_be_positive(self) -> None:
+        # Absent is allowed -- exits managed elsewhere -- but present and
+        # non-positive is not a target. Refused at the model rather than passed to
+        # a broker that would.
+        with pytest.raises(ValueError, match="take_profit"):
+            ExecutionRequest(
+                signal_id="stb-x",
+                symbol="EURUSD",
+                direction=Direction.LONG,
+                volume=Decimal("0.12"),
+                entry=Decimal("1.10000"),
+                stop_loss=Decimal("1.09700"),
+                take_profit=Decimal("0"),
+            )
 
     def test_direction_words_are_words(self) -> None:
         assert direction_word(Direction.LONG) == "buy"
