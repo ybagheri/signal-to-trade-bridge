@@ -928,20 +928,48 @@ sizer. Default: `NO_TRADE` with reason `VOLUME_BELOW_BROKER_MINIMUM`.
 
 ### 5.7 Execution — delegate, do not re-implement
 
-`AutoTradeExecutor` wraps `ExecutionWorkflow`:
+`AutoTradeExecutor` wraps `auto_trade`'s real `ExecutionWorkflow`. The workflow
+owns the state machine, the ledger ordering, the kill-switch check, the
+`demo_only` policy and the classification of a failed click as `UNKNOWN`. Those
+are the mechanisms standing between a decided trade and a duplicate position, so
+the wrapper translates and delegates; it does not re-derive any of them.
 
 * builds an `auto_trade.domain.models.TradeSignal` from the bridge's
-  `ExecutionRequest`
-* sets `signal_id` to the deterministic key from §5.3
+  `ExecutionRequest`, passing **entry, stop, take profit and volume through
+  unchanged** — the bridge computed them, and re-deriving them here would be a
+  second opinion about position size
+* sets `signal_id` to the deterministic key from §5.3, which satisfies upstream's
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` because that id becomes a filename
 * sets `source` to a bridge identifier and `strategy` to the engine's
   `subject`, so an audit record can be traced back to the detector
-* puts the engine's evidence score in `confidence` — **renamed and documented as
-  an evidence score, not a probability**, because `auto-trade` stores it in a
-  field called `confidence` and the two must not be confused
+* **does not put the evidence score in `confidence`.** Upstream types that field
+  as a probability in `0..1` and would be read as one; the bridge's
+  `evidence_score` is explicitly *not* a probability (§5.3). It travels in
+  `metadata` under its own name, where a field typed as a probability cannot
+  carry it
 * puts the full upstream decision in `metadata`, so `auto-trade`'s own audit log
   keeps the provenance
 * calls `workflow.execute(signal)` and maps the `ExecutionResult` status per
-  §3.8
+  §3.8 — with **`CLOSED` mapped to `UNKNOWN`, never `REJECTED`.** A closed
+  position means the order *was* placed, so a retry is the duplicate §3.8 forbids;
+  `REJECTED` would be a licence to resend
+* catches **broadly** around `execute`, because it is not exception-free: it
+  re-raises `ExecutionUnknownError` when a click may have been used. Anything
+  escaping becomes `UNKNOWN` — recorded, escalated, never retried
+* leaves `executed_price` as `None`. Upstream's evidence carries two snapshot
+  references and no fill price, and a click is not a fill
+
+**Three things the wrapper refuses to do**, each enforced by a test:
+
+1. **It does not construct the workflow.** The kill switch, ledger, audit log and
+   terminal adapter are the safety envelope; an executor that assembled its own
+   could assemble one without them.
+2. **It cannot name `MT5DesktopAdapter` or `ExecutionGate`** — the class that
+   clicks and the switch that stops it. Dropping either guard is what makes a dry
+   run able to reach a final control, and the module has no way to defeat either.
+3. **It is not wired into `ProcessSignal` yet.** Execution arrives with the
+   idempotency ledger and the kill switch around it, not before; the structural
+   test asserting the pipeline imports no `TradeExecutor` keeps passing on purpose.
 
 `FakeTradeExecutor` records every submitted request in memory for tests. It
 implements the same port, so a test asserting on recorded orders exercises the
@@ -949,17 +977,35 @@ real pipeline.
 
 ### 5.8 The MT5 adapter for account and symbol data
 
-Following the `albrooks.adapters.mt5` design, because it is already proven:
-dependency-injected `mt5_module`, a `Protocol` for the subset of the bindings
-used, and no import of `MetaTrader5` outside that one module. It supplies
-`AccountProvider` (balance, equity, currency) and `SymbolSpecProvider`
-(contract size, tick size, tick value profit/loss, volume step/min/max, digits,
-point, spread, trade mode, filling modes).
+This phase originally recorded the pattern as "following
+`albrooks.adapters.mt5.MT5Feed`, because it is already proven". **That correction
+still stands:** `MT5Feed` is in `albrooks`, whose checkout is not on this machine,
+so its shape cannot be verified here — and `auto_trade` has no such class. The
+adapter implements the pattern independently instead, which is the better outcome
+anyway: a pattern that was copied and checked against the real thing beats one
+inherited on the strength of a class nobody here has read.
 
-A direct consequence for the dependency strategy: `albrooks` is a hard
-dependency of the bridge's MT5 adapter, and `auto-trade` is a hard dependency of
-the execution adapter. Neither belongs in the domain layer, and neither is
-imported by a test of the domain layer.
+What it actually does: an injected bindings module, a `Protocol` for the subset
+used, and no import of `MetaTrader5` outside `bindings.py`. It supplies
+`AccountProvider` (balance, equity, currency, and the open-position count from
+the terminal's own published snapshot) and `SymbolSpecProvider` (contract size,
+tick size, tick value profit/loss, volume step/min/max, digits, point, spread,
+trade mode, filling modes).
+
+A test walks the AST and fails on any `launch` attribute anywhere in the package:
+`initialize` connects, `launch` starts a process, and a process that starts a
+trading terminal is a process that can start it by accident.
+
+A direct consequence for the dependency strategy: `albrooks` is a dependency of
+the bridge's MT5 adapter, and `auto-trade` of the execution adapter. Neither
+belongs in the domain layer, and neither is imported by a test of the domain
+layer.
+
+**Both are imported lazily, behind a function, and behind a declared subset.**
+`load_bindings()` in each adapter package is the only import site, so the packages
+import on a machine that has neither installed — which is what keeps the whole
+suite runnable. An adapter that could not be tested without its dependency would
+be an adapter whose hardest cases are the ones nobody can check.
 
 ### 5.9 Ports
 

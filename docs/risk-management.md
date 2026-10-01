@@ -9,13 +9,15 @@ the first refusal, and returns either a `NO_TRADE` carrying a reason code or a
 `DRY_RUN` carrying a fully sized `TradeIntent`.
 
 What remains unimplemented is everything *after* the decision: idempotency
-(Phase 9), dry-run reporting (Phase 8), execution (Phase 7) and the real MT5
-data adapter (Phase 7). In tests the account and symbol facts come from
-`adapters/fake/`, which satisfies the same ports the terminal adapter will.
+(Phase 9) and dry-run reporting (Phase 8). In tests the account and symbol facts
+come from `adapters/fake/`, which satisfies the same ports the terminal adapter
+drives; in production both the data adapter and the execution adapter are real
+and written in Phase 7.
 
-The bridge can now take a signal all the way to a sized, unsent decision. It
-cannot yet send one, because no executor is wired into the pipeline and the
-default configuration cannot execute.
+The bridge can take a signal all the way to a sized, unsent decision, and it now
+has a real executor to send it with. **It still does not call one**, because the
+default configuration cannot execute and the idempotency ledger is not behind the
+pipeline yet — see the invariant below.
 
 ---
 
@@ -577,7 +579,7 @@ record that could be edited after the fact would not be one.
 | The account and spec in production | a terminal | Phase 7. `adapters/mt5/` |
 | Idempotency / duplicate protection | the ledger | Phase 9 |
 | Dry-run reporting | an executor-shaped record | Phase 8 |
-| Execution | `auto-trade`'s `ExecutionWorkflow` | Phase 7 |
+| Execution | `auto-trade`'s `ExecutionWorkflow` | **Built**, Phase 7. `adapters/auto_trade/`. Wired into the pipeline in Phase 9, with the ledger. |
 | Margin check | live account state | Not scheduled. Recorded as a known gap: a position can pass every check here and still be refused for margin at the broker. |
 
 ---
@@ -628,5 +630,5 @@ record that could be edited after the fact would not be one.
     gate that admitted a trade and the arithmetic that sized it saw the same
     numbers.
 21. **A passing trade is `DRY_RUN`, never `EXECUTE`,** and the pipeline module
-    imports no `TradeExecutor`. Execution belongs to Phase 7, where the kill
+    imports no `TradeExecutor`. Execution belongs to Phase 9, where the kill
     switch, the idempotency ledger and the audit log come with it.

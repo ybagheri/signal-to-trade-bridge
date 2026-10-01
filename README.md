@@ -63,15 +63,15 @@ either.
 | 5 | 1:1 risk/reward take-profit policy | ✅ complete |
 | 6 | Trade validation pipeline | ✅ complete |
 | 7 | MT5 account/symbol adapter | ✅ complete |
-| 7b | auto-trade execution adapter | ⬜ next — needs the `auto-trade` checkout |
-| 8 | Dry run / simulation mode | ⬜ |
+| 7b | auto-trade execution adapter | ✅ complete |
+| 8 | Dry run / simulation mode | ▸ next |
 | 9 | Idempotency and duplicate protection | ⬜ |
 | 10 | End-to-end integration | ⬜ |
 | 11 | MT5 / demo validation (isolated, opt-in) | ⬜ |
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**761 tests passing, 97% coverage.** Lint, format, type check and the
+**811 tests passing, 97% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
@@ -84,9 +84,12 @@ turned into a `TradeDecision` carrying either a reason code or a fully sized
 intent. The account snapshot the concurrency gate reads also comes from the terminal
 now, from the position file its own indicator publishes.
 
-**What does not:** act on the decision. No executor is wired into the pipeline, so
-a validated trade comes back as a dry run. A volume below the broker's minimum is
-refused rather than floored up, always.
+**What does not:** act on the decision **from the pipeline**. The executor exists, and
+it is tested against the execution project's real workflow rather than a double, but
+it is deliberately **not** wired into `ProcessSignal` yet — execution arrives with
+the idempotency ledger and the kill switch around it, not before, and a test asserts
+the pipeline imports no executor while that holds. A volume below the broker's minimum
+is refused rather than floored up, always.
 
 ---
 
