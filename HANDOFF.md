@@ -1531,7 +1531,9 @@ Branch `main`, tracking `origin/main`. Working tree state at the time Phase 6
 was written: see the commit list below.
 
 ```
+e559a4a  feat: the MT5 data adapter -- account and symbol facts from a real terminal
 4f931f3  feat: the decision pipeline -- the first thing that calls the others
+27bad30  docs: record the phase 5 commit hash, push status, and the floor question as open
 3f8d21e  feat: finish the reward:risk policy, and fix four ways it was not what it said
 7c9bb99  docs: record the phase 4 commit hash, push status, and what this machine could not verify
 f250a4f  feat: risk management and position sizing, and fix the tick value divisor
@@ -1552,11 +1554,11 @@ dc336bd  feat: project foundation, domain layer, ports, config and test harness
 ## Latest Commit
 
 ```
-4f931f386c48a9125daa7d5ceebf2323cac04a7d
-feat: the decision pipeline -- the first thing that calls the others
+e559a4a82f608f4ecf5cbce9b65ce8535d391eaf
+feat: the MT5 data adapter -- account and symbol facts from a real terminal
 ```
 
-**Push status: SUCCESS** — `27bad30..4f931f3  main -> main` on
+**Push status: SUCCESS** — `51a84f1..e559a4a  main -> main` on
 `git@github.com:ybagheri/signal-to-trade-bridge.git`. `origin/main` was read back
 afterwards and matches the local head exactly.
 
