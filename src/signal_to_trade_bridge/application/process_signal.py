@@ -41,17 +41,30 @@ running -- all of them come back as a ``TradeDecision`` carrying a reason code.
 An exception would mean the trading loop died on exactly the conditions it exists
 to survive, and the commonest outcome here is "the engine found nothing to trade".
 
-### It cannot place an order
+### It cannot place an order -- until Phase 9 wired it, and what that required
 
-A trade that passes every check comes back as ``DRY_RUN``, not ``EXECUTE``, and
-that is not a placeholder. There is no ``TradeExecutor`` wired into this class, so
-``EXECUTE`` would be a lie; and with the default configuration the bridge cannot
-execute anyway. Calling it a dry run says exactly what happened: every check
-passed, nothing was sent, and nothing could have been. Phase 7 supplies the
-executor and Phase 8 makes the dry-run path report in full. **This module must not
-grow an executor reference before then** -- an execution path that appears without
-the kill switch, the idempotency ledger and the audit log around it is the failure
-the architecture was drawn to prevent.
+A trade that passes every check came back as ``DRY_RUN`` through Phase 8. That was
+true and it was not much use. Phase 9 gave :meth:`ProcessSignal.wire_execution` an
+:class:`~application.execution_envelope.ExecutionEnvelope`, so the pipeline can now
+reach an executor -- **and only together with the idempotency ledger and the kill
+switch.**
+
+That is the whole point of the envelope type, and it replaces a rule this module used
+to hold by assertion alone. For three phases a test read this file's source and
+failed if it imported ``TradeExecutor``: an execution path appearing here without the
+ledger and the kill switch around it is the failure the architecture was drawn to
+prevent. That test has been retired, because **an absence cannot also authorise** --
+it can only forbid. The rule it enforced is now a type: the envelope has no public
+constructor, so there is no way to hand this class an executor without the other two.
+
+What is still refused here, deliberately:
+
+* **an executor alone.** :meth:`wire_execution` takes the envelope, not a port.
+* **the ledger consulted before the send.** The ledger answers *after* every stage,
+  on the deterministic ``signal_id``, so a re-delivered reading of the same bar is
+  refused before anything is sent rather than after.
+* **anything at all on the default configuration.** ``execution_enabled`` defaults to
+  false, and the default cannot execute.
 
 ### The account is one snapshot per decision
 
@@ -72,11 +85,18 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from signal_to_trade_bridge.application.dry_run import (
+    DryRunReport,
+    report_for,
+)
+from signal_to_trade_bridge.application.execution_envelope import ExecutionEnvelope
 from signal_to_trade_bridge.application.risk_service import RiskService
 from signal_to_trade_bridge.configuration.config import BridgeConfig
 from signal_to_trade_bridge.domain.enums import DecisionAction, RejectionReason
 from signal_to_trade_bridge.domain.models import (
     AccountBalance,
+    ExecutionRequest,
+    ExecutionResult,
     RiskBudget,
     RiskParameters,
     Signal,
@@ -133,6 +153,7 @@ class ProcessSignal:
         *,
         logger: StructuredLogger | None = None,
         now: Callable[[], datetime] | None = None,
+        ask_downstream: Callable[[ExecutionRequest], Any] | None = None,
     ) -> None:
         self._risk = risk
         self._config = config
@@ -141,6 +162,56 @@ class ProcessSignal:
         # test can pin "now" and get an identical decision twice. `utc_now`
         # exists; nothing should force the use of it over an injected value.
         self._now = now or (lambda: datetime.now(UTC))
+        # Asked what the execution project's own gates would say, for the dry-run
+        # report only. Optional, and `None` produces an *unevaluated* verdict rather
+        # than an accepted one -- see `DownstreamVerdict`.
+        self._ask_downstream = ask_downstream
+        # Absent until `wire_execution`. Not an executor: an executor alone is
+        # unrepresentable, so this is either nothing or all three.
+        self._envelope: ExecutionEnvelope | None = None
+
+    # -- wiring -----------------------------------------------------------
+
+    def wire_execution(self, envelope: ExecutionEnvelope) -> None:
+        """Allow this pipeline to send, with the ledger and the kill switch.
+
+        Takes the envelope rather than an executor **on purpose**: the envelope has
+        no public constructor, so a caller cannot reach this method with an executor
+        and nothing else. Three phases of "the pipeline imports no executor" could
+        forbid the mistake; only a type can permit the right thing safely.
+
+        Idempotent in the harmless direction -- wiring twice replaces the envelope
+        rather than composing two -- because a composition root that wires in two
+        passes has a bug, and stacking envelopes would be an unlogged second way to
+        place an order.
+        """
+        self._envelope = envelope
+        # No new event member here on purpose. `EXECUTION_RESULT` carries the state
+        # where it matters and is emitted on every decision; adding an enum member
+        # for a wiring diagnostic would grow the vocabulary for something nobody
+        # will search for. `debug`, not `event`, because this is once at startup and
+        # not a fact about any trade.
+        self._log.debug(
+            Event.DRY_RUN_COMPLETED,
+            stage="wire_execution",
+            envelope=repr(envelope),
+            execution_enabled=self._config.execution_enabled,
+            dry_run=self._config.dry_run,
+        )
+
+    @property
+    def can_execute(self) -> bool:
+        """Whether this pipeline would actually send, if a trade passed.
+
+        Three conditions, and all three reported rather than one derived flag,
+        because "wired but dry-running" and "wired but execution disabled" are
+        different operational states with different remedies.
+        """
+        return (
+            self._envelope is not None
+            and self._config.execution_enabled
+            and not self._config.dry_run
+        )
 
     # -- the use case ----------------------------------------------------
 
@@ -248,6 +319,288 @@ class ProcessSignal:
         )
         return self._validated(signal.signal_id, intent)
 
+    # -- after the decision: send, or say exactly why not -------------------
+
+    def _validated(self, signal_id: str, intent: TradeIntent) -> TradeDecision:
+        """A trade that passed every check: send it, or report in full why not.
+
+        The fork is here and nowhere else, and **both branches produce the same
+        ``TradeIntent``** -- the sizing is done either way. That is deliberate: a
+        dry run that stops short of building the order cannot report the order, and
+        the order is the thing an operator needs to see before enabling execution.
+
+        Order of the checks, and it is not arbitrary:
+
+        1. **the ledger** -- before the configuration. An engine that has no record
+           of this signal id may proceed; one that does is refused regardless of
+           whether execution is even enabled, because the answer "this trade already
+           happened" is true whether or not we are about to place it.
+        2. **the configuration** -- wiring, then ``execution_enabled``, then
+           ``dry_run``. Each is a separate blocker rather than one boolean, so a
+           misconfiguration is named.
+        3. **the kill switch** -- checked here even though the workflow checks it
+           too. Ours is the outer layer: if it is engaged, nothing is sent and the
+           refusal is ours rather than a result the caller has to interpret.
+        """
+        report = report_for(
+            intent,
+            execution_enabled=self.can_execute,
+            dry_run=self._config.dry_run,
+            ask_downstream=self._ask_downstream,
+            extra={"wired": self._envelope is not None},
+        )
+        self._log_dry_run(report)
+
+        if self._envelope is not None and self._envelope.idempotency.contains(signal_id):
+            return self._duplicate(signal_id, intent, report)
+
+        if self._envelope is not None and self._config.execution_enabled:
+            if self._config.dry_run:
+                return self._dry_run(signal_id, intent, report)
+            if self._envelope.kill_switch.active:
+                return self._killed(signal_id, intent, report)
+            return self._send(signal_id, intent, report)
+
+        return self._dry_run(signal_id, intent, report)
+
+    def _log_dry_run(self, report: DryRunReport) -> None:
+        """Emit the report whether or not anything will be sent.
+
+        Emitted on **every** path, including the one that sends. The first live
+        order is exactly the moment somebody will want to read what was decided, and
+        an event that only fires when nothing happens is silent on the day it starts
+        mattering.
+        """
+        request = report.request
+        self._log.event(
+            Event.EXECUTION_RESULT,
+            signal_id=None if request is None else request.signal_id,
+            symbol=None if request is None else request.symbol,
+            volume=None if request is None else str(request.volume),
+            entry=None if request is None else str(request.entry),
+            stop_loss=None if request is None else str(request.stop_loss),
+            take_profit=None
+            if request is None or request.take_profit is None
+            else str(request.take_profit),
+            reward_to_risk=None if report.reward_to_risk is None else str(report.reward_to_risk),
+            risk_amount=str(report.risk_amount),
+            planned_loss=str(report.planned_loss),
+            would_be_sent=report.would_be_sent,
+            downstream_would_accept=report.downstream_would_accept,
+            downstream_reason=report.downstream.reason,
+            downstream_evaluated=report.downstream.evaluated,
+            blockers=list(report.blockers()),
+        )
+
+    def _duplicate(
+        self, signal_id: str, intent: TradeIntent, report: DryRunReport
+    ) -> TradeDecision:
+        """This signal id has been acted on before. Refuse before sending.
+
+        Checked against the ledger rather than against this process's memory,
+        because a re-delivery can arrive after a restart -- which is the case that
+        matters, and the one an in-memory set would silently miss.
+
+        A ``REJECTED`` refusal, not ``UNKNOWN``: nothing was sent, because this is
+        the check that happened before the send. It is also the refusal upstream's
+        ledger produces on its own (``"duplicate signal id"``), so the bridge and the
+        execution project now agree about it rather than one permitting what the
+        other forbids.
+        """
+        self._log.warning(
+            Event.TRADE_REJECTED,
+            signal_id=signal_id,
+            stage="idempotency",
+            reason=RejectionReason.DUPLICATE_SIGNAL.value,
+            explanation=(
+                "this signal id is already in the idempotency ledger, so it has been acted "
+                "on before and is not offered again. The signal id is a hash of the bar and "
+                "the setup, so this is a re-delivery of the same reading rather than a new "
+                "trade."
+            ),
+            blockers=list(report.blockers()),
+        )
+        return TradeDecision(
+            signal_id=signal_id,
+            action=DecisionAction.NO_TRADE,
+            reason=RejectionReason.DUPLICATE_SIGNAL.value,
+            explanation=(
+                "already acted on: this signal id is in the idempotency ledger. Nothing was sent."
+            ),
+            intent=intent,
+            decided_at=self._now(),
+            diagnostics={
+                "stage": "idempotency",
+                "report": report.to_dict(),
+            },
+        )
+
+    def _killed(self, signal_id: str, intent: TradeIntent, report: DryRunReport) -> TradeDecision:
+        """The kill switch is engaged. Nothing is sent, and it is not a failure."""
+        self._log.warning(
+            Event.TRADE_REJECTED,
+            signal_id=signal_id,
+            stage="kill_switch",
+            reason=RejectionReason.KILL_SWITCH_ACTIVE.value,
+            explanation=(
+                "the kill switch is engaged, so nothing was sent. This is a deliberate stop "
+                "and not a fault."
+            ),
+        )
+        return TradeDecision(
+            signal_id=signal_id,
+            action=DecisionAction.NO_TRADE,
+            reason=RejectionReason.KILL_SWITCH_ACTIVE.value,
+            explanation="the kill switch is engaged; nothing was sent.",
+            intent=intent,
+            decided_at=self._now(),
+            diagnostics={"stage": "kill_switch", "report": report.to_dict()},
+        )
+
+    def _send(self, signal_id: str, intent: TradeIntent, report: DryRunReport) -> TradeDecision:
+        """Send it, and record what came back.
+
+        The ledger is consulted again *after* the send, because the envelope's own
+        ledger and the executor's are the same file written by the same upstream
+        class -- so this records the bridge's view for a caller that reads the
+        bridge's decisions, and the executor's write is what makes a restart see it.
+
+        **An exception from the executor is a decision, not a crash.** The executor
+        already converts upstream's escaping ``ExecutionUnknownError`` into an
+        ``UNKNOWN`` result; this catches the rest, because a decision whose recording
+        failed must still be recorded.
+        """
+        assert self._envelope is not None  # guaranteed by the caller
+        request = report.request
+        assert request is not None  # every validated intent produces one since Phase 9
+
+        try:
+            result = self._envelope.executor.submit(request)
+        except Exception as exc:  # broad on purpose: a crash here loses the record
+            result = ExecutionResult(
+                signal_id=signal_id,
+                status=ExecutionResult.STATUS_UNKNOWN,
+                message=f"the executor raised {type(exc).__name__}: {exc}. The order may or "
+                f"may not have reached the terminal, so it is recorded as UNKNOWN and "
+                f"must not be retried.",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        self._log_execution(request, result)
+        return self._executed(signal_id, intent, report, result)
+
+    def _log_execution(self, request: ExecutionRequest, result: ExecutionResult) -> None:
+        """Log one sent order, with everything needed to investigate it later.
+
+        The request is logged alongside the result rather than only the result,
+        because a result whose request cannot be reconstructed is not
+        investigable: the volume and the prices are the only way to tell whether a
+        broker behaved oddly or the bridge sized the trade wrong.
+
+        ``error`` is carried even on success, because upstream's message field is
+        where a rejection reason lives and dropping it would lose the only text
+        explaining a ``REJECTED``.
+        """
+        self._log.event(
+            Event.EXECUTION_RESULT,
+            signal_id=request.signal_id,
+            symbol=request.symbol,
+            direction=request.direction.value,
+            volume=str(request.volume),
+            entry=str(request.entry),
+            stop_loss=str(request.stop_loss),
+            take_profit=None if request.take_profit is None else str(request.take_profit),
+            status=result.status,
+            position_id=result.position_id,
+            error=result.error,
+            message=result.message,
+        )
+
+    def _executed(
+        self,
+        signal_id: str,
+        intent: TradeIntent,
+        report: DryRunReport,
+        result: ExecutionResult,
+    ) -> TradeDecision:
+        """Turn an execution result into a decision, honestly in every direction.
+
+        The mapping is the point. ``ACCEPTED`` becomes ``EXECUTE`` because a position
+        was independently observed to exist. **``DRY_RUN`` becomes ``DRY_RUN``**,
+        which can happen when the execution project's own policy refuses to execute
+        even though the bridge's configuration allows it -- two configurations, and
+        the downstream one wins. Everything else is a ``NO_TRADE`` carrying the
+        result's status, including ``UNKNOWN``, which is never retried.
+        """
+        action = (
+            DecisionAction.EXECUTE
+            if result.is_accepted
+            else DecisionAction.DRY_RUN
+            if result.is_dry_run
+            else DecisionAction.NO_TRADE
+        )
+        reason = PASSED if action is not DecisionAction.NO_TRADE else result.status
+        self._log.event(
+            Event.EXECUTION_RESULT,
+            signal_id=signal_id,
+            status=result.status,
+            action=action.value,
+            position_id=result.position_id,
+            executed_price=None if result.executed_price is None else str(result.executed_price),
+            error=result.error,
+            retryable=result.is_retryable,
+        )
+        return TradeDecision(
+            signal_id=signal_id,
+            action=action,
+            reason=reason,
+            explanation=result.message,
+            intent=intent,
+            execution=result,
+            decided_at=self._now(),
+            diagnostics={"stage": "executed", "report": report.to_dict()},
+        )
+
+    def _dry_run(self, signal_id: str, intent: TradeIntent, report: DryRunReport) -> TradeDecision:
+        """Every check passed, nothing was sent, and the report says why not."""
+        self._log.event(
+            Event.TRADE_VALIDATED,
+            **{
+                "signal_id": signal_id,
+                "symbol": intent.symbol,
+                "direction": intent.direction.value,
+                "volume": str(intent.volume),
+                "entry": str(intent.entry),
+                "stop_loss": str(intent.stop_loss.price),
+                "stop_distance": str(intent.stop_loss.distance),
+                "take_profit": None
+                if intent.take_profit is None
+                else str(intent.take_profit.price),
+                "reward_to_risk": None
+                if intent.reward_to_risk is None
+                else str(intent.reward_to_risk),
+                "risk_amount": str(intent.risk_amount),
+                "planned_loss": str(intent.position_size.planned_loss),
+                "execution_enabled": self._config.execution_enabled,
+                "dry_run": self._config.dry_run,
+            },
+            note="every check passed; nothing was sent. " + "; ".join(report.blockers()),
+        )
+        return TradeDecision(
+            signal_id=signal_id,
+            action=DecisionAction.DRY_RUN,
+            reason=PASSED,
+            explanation=(
+                "every check passed and the trade is fully sized, and nothing was sent. "
+                + ("The execution envelope is not wired." if self._envelope is None else "")
+                + " Blockers: "
+                + ("; ".join(report.blockers()) or "none")
+            ),
+            intent=intent,
+            decided_at=self._now(),
+            diagnostics={"stage": "complete", "report": report.to_dict()},
+        )
+
     # -- the two outcomes --------------------------------------------------
 
     def _log_take_profit(
@@ -319,56 +672,6 @@ class ProcessSignal:
             explanation=resolution.explanation,
             decided_at=self._now(),
             diagnostics={"stage": stage, **dict(resolution.details)},
-        )
-
-    def _validated(self, signal_id: str, intent: TradeIntent) -> TradeDecision:
-        """A trade that passed every check, recorded and deliberately not sent.
-
-        ``DRY_RUN`` rather than ``EXECUTE``, and the distinction is the whole
-        reason :attr:`DecisionAction.is_trade` is ``False`` for it. A trade that
-        passed every check and sent nothing must never read as a fill, or a log
-        becomes evidence of an order that does not exist.
-
-        The dry-run *reporting* is Phase 8. This is only the honest action name for
-        a decision that succeeded and could not have executed.
-        """
-        ratio = intent.reward_to_risk
-        fields: dict[str, Any] = {
-            "signal_id": signal_id,
-            "symbol": intent.symbol,
-            "direction": intent.direction.value,
-            "volume": str(intent.volume),
-            "entry": str(intent.entry),
-            "stop_loss": str(intent.stop_loss.price),
-            "stop_distance": str(intent.stop_loss.distance),
-            "take_profit": str(intent.take_profit.price)
-            if intent.take_profit is not None
-            else None,
-            "reward_to_risk": None if ratio is None else str(ratio),
-            "risk_amount": str(intent.risk_amount),
-            "planned_loss": str(intent.position_size.planned_loss),
-            "execution_enabled": self._config.execution_enabled,
-            "dry_run": self._config.dry_run,
-        }
-        self._log.event(
-            Event.TRADE_VALIDATED,
-            **fields,
-            note=(
-                "every check passed; nothing was sent and nothing could have been. "
-                "No executor is wired into the pipeline."
-            ),
-        )
-        return TradeDecision(
-            signal_id=signal_id,
-            action=DecisionAction.DRY_RUN,
-            reason=PASSED,
-            explanation=(
-                "every check passed and the trade is fully sized. No executor is wired into the "
-                "pipeline and the default configuration cannot execute, so nothing was sent."
-            ),
-            intent=intent,
-            decided_at=self._now(),
-            diagnostics={"stage": "complete", **fields},
         )
 
 

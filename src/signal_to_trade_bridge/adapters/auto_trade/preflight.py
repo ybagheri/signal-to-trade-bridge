@@ -177,7 +177,11 @@ def ask_downstream_risk(
                 limits.max_open_positions,
             )
             signal = _to_signal(request, bindings, clock, limits.expiration_seconds)
-            decision = RiskEngine(upstream_limits).validate(signal)
+            # `now` is passed explicitly rather than left to upstream's default.
+            # Upstream defaults to `utc_now()` while the signal was stamped from our
+            # injected clock, so a test pinning "now" would see the *real* clock
+            # expire the signal and every gate would report "signal is expired".
+            decision = RiskEngine(upstream_limits).validate(signal, now=clock())
         except Exception as exc:
             return DownstreamVerdict.not_evaluated(
                 f"the downstream risk engine could not be consulted: {type(exc).__name__}: {exc}"

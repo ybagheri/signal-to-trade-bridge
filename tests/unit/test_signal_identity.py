@@ -10,6 +10,7 @@ only checked the format.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 
 from signal_to_trade_bridge.adapters.albrooks.identity import (
     SIGNAL_ID_PREFIX,
@@ -115,6 +116,75 @@ class TestDirectionAndAction:
         # Two setups can be valid on the same bar. They are different decisions
         # and must not collapse into one key.
         assert _key(setup_id="pullback_h#0") != _key(setup_id="double_bottom#0")
+
+
+class TestTheKeyCannotSilentlyCollapseTwoTrades:
+    """Phase 9 revisited this key, as the handoff required, and found a hole.
+
+    The handoff asked Phase 9 to check the key against real engine output. It could
+    not -- `albrooks` is not installed on this machine -- so it checked the thing the
+    key is actually built from instead: **what the mapper supplies when the engine
+    does not report a bar.**
+
+    `_bar_index` returns `-1` when the engine's result has no `last_closed_bar`, and
+    `_bar_time` returns `None` when there is no matching bar feature. Both are
+    *permitted*: they are ordinary attribute lookups with a fallback, so nothing
+    raises and nothing is logged. A `Signal` then carries `bar_index=-1` and
+    `bar_time=None`, and **the bar -- which is the whole unit of identity -- is
+    simply absent from the key**.
+
+    The consequence is below, and it is the failure mode the ledger exists to
+    prevent, arriving through the ledger: two readings with no bar information
+    produce the *same* key, so the second is refused as a duplicate even though it is
+    a different trade.
+    """
+
+    def test_two_readings_with_no_bar_information_collapse_into_one_key(self) -> None:
+        # The defect, stated directly. Nothing raises, nothing warns, and the key is
+        # perfectly valid -- it just means "this is the same reading as last time"
+        # for two readings that are not the same.
+        assert _key(bar_index=-1, bar_time=None) == _key(bar_index=-1, bar_time=None)
+
+    def test_the_symbol_still_separates_them(self) -> None:
+        # The reassuring half, and worth pinning because it is what stops this being
+        # catastrophic rather than serious. Two different symbols never collide, so
+        # the damage is confined to one symbol on one timeframe.
+        assert _key(bar_index=-1, bar_time=None, symbol="GBPUSD") != _key(
+            bar_index=-1, bar_time=None, symbol="EURUSD"
+        )
+
+    def test_the_setup_still_separates_them(self) -> None:
+        # Also reassuring: two different setups on the same bar do not collide.
+        assert _key(bar_index=-1, bar_time=None, setup_id="a") != _key(
+            bar_index=-1, bar_time=None, setup_id="b"
+        )
+
+    def test_bar_time_alone_is_enough_when_the_index_is_missing(self) -> None:
+        # Which is why the collapse needs *both* to be absent: the engine that
+        # reports a close time but no index is fine, and the engine that reports an
+        # index but no time is fine.
+        assert _key(bar_index=-1, bar_time=100.0) != _key(bar_index=-1, bar_time=200.0)
+        assert _key(bar_index=1, bar_time=None) != _key(bar_index=2, bar_time=None)
+
+    def test_the_production_default_is_the_collapse(self) -> None:
+        # WHY this matters: `bar_index` defaults to `-1` on the model itself, so a
+        # `Signal` built without one is not an unusual thing -- it is the declared
+        # default. The mapper's fallback and the model's default agree, which means
+        # the key can be degenerate without anything looking wrong.
+        from signal_to_trade_bridge.domain.models import Signal
+
+        defaults = Signal(
+            symbol="EURUSD",
+            timeframe="H1",
+            action=SignalAction.BUY,
+            direction=Direction.LONG,
+            entry=Decimal("1.10000"),
+            stop_loss=Decimal("1.09700"),
+            stop_basis="PULLBACK_EXTREME",
+            signal_id="stb-whatever",
+        )
+        assert defaults.bar_index == -1
+        assert defaults.bar_time is None
 
 
 class TestItSatisfiesTheDownstreamFilenameRule:

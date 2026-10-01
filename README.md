@@ -64,14 +64,14 @@ either.
 | 6 | Trade validation pipeline | ✅ complete |
 | 7 | MT5 account/symbol adapter | ✅ complete |
 | 7b | auto-trade execution adapter | ✅ complete |
-| 8 | Dry run / simulation mode | ✅ complete |
-| 9 | Idempotency and duplicate protection | ▸ next |
+| 9 | Idempotency and duplicate protection | 𧀅 complete |
+| 10 | End-to-end integration | ▸ next |
 | 10 | End-to-end integration | ⬜ |
 | 11 | MT5 / demo validation (isolated, opt-in) | ⬜ |
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**850 tests passing, 98% coverage.** Lint, format, type check and the
+**920 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.

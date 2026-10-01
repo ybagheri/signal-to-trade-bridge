@@ -160,14 +160,52 @@ class IdempotencyStore(Protocol):
     store keyed on something generated per call would never match on a
     re-delivery, and the whole mechanism would pass its tests while doing nothing
     in production.
+
+    ### Why two methods and not one
+
+    This was a single ``record(key, mapping)`` until Phase 9, and that shape cannot
+    express what the real ledger does. Upstream's ``JsonExecutionLedger`` writes
+    ``REQUESTED`` **before** the click and the outcome **after** it, and that gap is
+    the whole mechanism: a process that dies mid-attempt leaves a pending record an
+    operator can settle, rather than no record at all. A single call collapses the
+    two moments, and the collapse is invisible until the first crash — at which point
+    the ledger says the signal was never attempted and the trade is free to repeat.
+
+    ``execution_id`` is what ties the two halves to one attempt. It is generated per
+    attempt, and the ledger refuses to overwrite an entry whose id differs, so a
+    second attempt cannot quietly take over the first one's record.
     """
 
     def contains(self, key: str) -> bool:
-        """Whether this key has already been recorded."""
+        """Whether this key has already been recorded.
+
+        **Any record counts, whatever its outcome.** Upstream's ledger is keyed on the
+        signal id and does not distinguish a filled attempt from a refused one, so a
+        signal id that has been acted on is not offered again. That is stricter than
+        :attr:`~domain.models.ExecutionResult.is_retryable`, which describes what a
+        caller may do with a result it holds rather than what a *new* attempt would
+        meet — see the note in ``docs/risk-management.md``.
+        """
         ...
 
-    def record(self, key: str, record: Mapping[str, Any]) -> None:
-        """Record that this key was acted on, and how it turned out."""
+    def record_attempt(self, key: str, execution_id: str) -> None:
+        """Record that an attempt on this key has begun, before anything is sent.
+
+        Must be durable before it returns. The window it opens is the recoverable
+        one: a crash after this call and before the outcome is recorded leaves a
+        pending entry rather than silence.
+        """
+        ...
+
+    def record_outcome(self, key: str, execution_id: str, outcome: Mapping[str, Any]) -> None:
+        """Record how the attempt turned out.
+
+        ``execution_id`` must match the one passed to :meth:`record_attempt`, and a
+        mismatched id must not overwrite the entry. ``outcome`` carries the status
+        and whatever else the implementation persists; its shape belongs to the
+        ledger, so it is a mapping rather than a bridge type the ledger would have
+        to import.
+        """
         ...
 
 

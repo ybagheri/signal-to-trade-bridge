@@ -40,11 +40,23 @@ from signal_to_trade_bridge.adapters.auto_trade.executor import (
     SENTINEL_PROFILE,
     AutoTradeExecutor,
 )
+from signal_to_trade_bridge.adapters.auto_trade.ledger import (
+    AutoTradeLedger,
+    open_ledger,
+)
+from signal_to_trade_bridge.adapters.auto_trade.preflight import (
+    DownstreamLimits,
+    ask_downstream_risk,
+)
 
 __all__ = [
     "SENTINEL_PROFILE",
     "AutoTradeBindings",
     "AutoTradeExecutor",
+    "AutoTradeLedger",
     "AutoTradeUnavailable",
+    "DownstreamLimits",
+    "ask_downstream_risk",
     "load_bindings",
+    "open_ledger",
 ]

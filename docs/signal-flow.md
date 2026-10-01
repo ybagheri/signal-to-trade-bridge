@@ -37,11 +37,11 @@ Market data
     ↓
 [12] The decision                    ProcessSignal.process             Phase 6  ← IMPLEMENTED
     ↓
-[13] Idempotency                                               Phase 9
+[13] Idempotency                                               Phase 9  ← IMPLEMENTED
     ↓
 [14] Dry run?  record, stop                          Phase 8  ← IMPLEMENTED
     ↓
-[15] Execution                                               Phase 7  — IMPLEMENTED
+[15] Execution                                               Phase 9  — REACHABLE
     ↓
 MetaTrader 5 → broker
 ```
@@ -90,7 +90,48 @@ account type, the kill switch, the ledger and the terminal window. When no engin
 wired the verdict is `evaluated=False`, never `accepted=True` — an unevaluated gate
 that reads as a pass is the specific silence this phase exists to prevent.
 
-**Phase 9 brings the ledger that would let step 15 be reached at all.**
+**Since Phase 9, step 15 is reachable** — and only with its whole envelope.
+
+```
+ProcessSignal
+  ├─ wire_execution(ExecutionEnvelope)
+  │      └─ executor + idempotency ledger + kill switch   all three, or none of them
+  └─ process(signal)
+         ├─ stages 1..7   unchanged
+         ├─ build the report, and ask the downstream gates
+         ├─ ledger.contains(signal_id)?        → NO_TRADE  DUPLICATE_SIGNAL
+         ├─ execution_enabled && !dry_run?
+         │    ├─ no  → DRY_RUN, with every blocker named
+         │    └─ kill switch engaged?  → NO_TRADE  KILL_SWITCH_ACTIVE
+         └─ executor.submit(request)          → EXECUTE / DRY_RUN / NO_TRADE
+```
+
+The envelope has no public constructor, so `wire_execution` cannot be handed an
+executor on its own. That replaced a test which read the pipeline's source and
+failed on any `TradeExecutor` import — an **absence** that could forbid the mistake
+but could not authorise the right thing. Three phases of forbidding is how this
+project spent the time it needed for permitting.
+
+**The duplicate check runs before the configuration,** because "this trade already
+happened" is true whether or not we were about to place it. Checked second, a
+duplicate on a live pipeline would reach the executor before the ledger was asked.
+
+**An executor that raises produces a recorded `UNKNOWN`,** not a traceback: a decision
+whose recording failed must still be recorded, and this is the outcome that most needs
+one.
+
+### The one thing that can still go wrong
+
+`compute_signal_id` hashes `(symbol, timeframe, bar_index, bar_time, action, direction,
+setup_id)` — **the bar is the unit of identity.** But the mapper falls back to
+`bar_index=-1` and `bar_time=None` when the engine reports neither, and `Signal`'s own
+default is `-1`, so the two agree. A signal with both fallbacks produces a key with
+**no bar in it**, and two of them hash alike.
+
+Different symbols and different setups still separate, and either field alone is
+enough — it takes both being absent. So it is a serious defect on one symbol and one
+timeframe, not a systemic one. **Phase 10's first job is to refuse such a signal**,
+which is fail-closed and needs no substitute key.
 
 Two properties exist only at this level, and are what the pipeline tests are for:
 
