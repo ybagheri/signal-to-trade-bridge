@@ -71,7 +71,7 @@ either.
 | 12 | Documentation, CLI, public API | 𧀅 complete |
 | 13 | Final architecture review | 𧀅 complete |
 
-**1205 tests passing, 98% coverage.** Lint, format, type check, the
+**1235 tests passing, 97% coverage.** Lint, format, type check, the
 domain-isolation check and a full layer-graph check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
@@ -95,6 +95,13 @@ sending, and the default configuration still cannot send:
 - `BRIDGE_EXECUTION_ENABLED=false` and `BRIDGE_DRY_RUN=true` are the shipped
   defaults. Reaching `build_live()` requires a deliberate call with both changed,
   plus a `DEMO` account, a readable ledger and a clear kill switch.
+
+**Known open defect, found by the first real order:** the order dialog's *input*
+fields are not being written. The symbol and the Buy/Sell click land, so a position
+opens — but the volume, stop loss and take profit do not, and a position with no
+stop is worse than no position at all. The system reports this correctly as
+`UNKNOWN`, because it cannot prove the opened position matches the request. See
+[HANDOFF.md](HANDOFF.md), Phase 14.
 
 No order has been placed by this project. A volume below the broker's minimum is
 refused rather than floored up, always.
