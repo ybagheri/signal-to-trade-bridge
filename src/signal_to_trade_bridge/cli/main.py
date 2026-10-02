@@ -45,17 +45,33 @@ again.
     Print a signal as JSON in the shape ``auto-trade``'s own provider reads. For
     interop, and for writing a signal file for ``check``.
 
+``trade``
+    Send one signal file through the **live** path, which can place a demo order.
+    Added in Phase 14, and gated three ways: ``--confirm-demo`` must be given, the
+    account must be a demo account, and the configuration must already have
+    execution enabled and dry-run off. Any one of them missing is a refusal.
+
 ``config``
     Print the effective configuration. Nothing in it is a secret, and none of it is
     redacted -- a caller that has to guess why the
     bridge is not executing is a caller who will eventually guess wrong.
 
-### No command can place an order
+### Only ``trade`` can place an order, and it takes three separate permissions
 
-Not one of them. The live path needs re-measured control identifiers, and until it
-has them ``build_live`` refuses -- so the CLI has nothing to expose. **If a future
-phase adds an order command it must be a separate opt-in flag with its own tests**,
-and this module's docstring is where that reasoning belongs.
+The rest of this module cannot. ``check`` and every library consumer go through
+``build_bridge``, which returns ``can_execute=False`` and attaches no executor.
+
+Placing an order takes all three of:
+
+1. ``BRIDGE_EXECUTION_ENABLED=true`` and ``BRIDGE_DRY_RUN=false`` in the environment
+2. a terminal whose control identifiers were measured on *its* build
+3. ``--confirm-demo`` on the command line
+
+Each is refused separately and each refusal names the one that is missing, because
+a single combined check would leave an operator unable to tell which of the three
+they had not done. That is the same reasoning as ``auto-trade execute
+--confirm-demo``, and it is why the flag exists at all: the point is not to make
+the order hard, it is to make the *intent* explicit at the moment it happens.
 """
 
 from __future__ import annotations
@@ -129,6 +145,8 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> _Out
         return _signal(args)
     if args.command == "config":
         return _config(args)
+    if args.command == "trade":
+        return _trade(args)
     parser.error(f"unknown command {args.command!r}")  # pragma: no cover
     raise AssertionError("unreachable")
 
@@ -651,6 +669,30 @@ def _parser() -> argparse.ArgumentParser:
     config = sub.add_parser("config", help="print the effective configuration as JSON")
     _common(config)
 
+    trade = sub.add_parser(
+        "trade",
+        help="send one signal file through the LIVE path; can place a demo order",
+    )
+    _common(trade)
+    trade.add_argument("signal", type=Path, help="a signal JSON file; see `stb signal`")
+    trade.add_argument(
+        "--confirm-demo",
+        action="store_true",
+        help=(
+            "required acknowledgement that this may place a demo order. Without it "
+            "nothing is sent, and the refusal says so rather than proceeding."
+        ),
+    )
+    trade.add_argument(
+        "--what-if",
+        action="store_true",
+        help=(
+            "do everything except click: build the live path, run the pipeline, and "
+            "print the full decision with the volume and prices it would send. This is "
+            "the flag to use first."
+        ),
+    )
+
     return parser
 
 
@@ -659,8 +701,21 @@ def _config_from_env(args: argparse.Namespace) -> BridgeConfig:
 
     ``--log-dir`` is applied **after** ``from_env`` so it wins over the environment.
     A flag that lost to an env var would be a flag that silently did nothing, and a
-    developer pointing the ledger somewhere else to look at it is the case where that
-    matters most.
+    developer pointing the ledger somewhere else to look at it is exactly the case
+    where that matters most.
+
+    ``apply=True``, so a ``.env`` file is honoured. **That mutates ``os.environ``**,
+    which is the documented behaviour of :func:`config_from_env` and is correct for
+    a process that is about to use the configuration -- but it is also a side effect
+    a library caller does not expect from something that reads a file, so it is
+    spelled out here rather than left to the default.
+
+    It was found the hard way: this function left every ``BRIDGE_`` variable from
+    the repository's ``.env`` in the process environment, and a test that ran
+    afterwards and asserted the *shipped defaults* failed -- correctly, because the
+    defaults were no longer what the process could see. Two configuration tests in
+    another file broke on the day this machine armed itself, and neither had anything
+    to do with the CLI.
     """
     from dataclasses import replace
 
@@ -669,3 +724,146 @@ def _config_from_env(args: argparse.Namespace) -> BridgeConfig:
     config = config_from_env()
     override = getattr(args, "log_dir", None)
     return replace(config, log_directory=override) if override else config
+
+
+# --- trade ------------------------------------------------------------------
+
+
+def _trade(args: argparse.Namespace) -> _Outcome:
+    """One signal file, through the **live** path.
+
+    This is the only command in this module that can place an order, and it is the
+    reason the module docstring changed. Three permissions are required and each is
+    checked separately, so a refusal names the one that is missing:
+
+    1. ``--confirm-demo`` on the command line
+    2. ``execution_enabled`` and not ``dry_run`` in the configuration
+    3. a terminal whose control identifiers were measured on its own build
+
+    Number 1 is first and it is a flag, because it is the only one that proves a
+    person was present. A configuration left armed on a machine is a machine that
+    will trade the next time anything calls the live path; a flag has to be typed
+    every time, which is the property that makes the difference between "the system
+    is configured to trade" and "somebody asked for a trade".
+
+    ``--what-if`` does everything except the click: it builds the live side, runs the
+    signal through it, and prints the decision including the volume and the prices.
+    That is the flag to reach for first, and it is why it exists rather than
+    "just try it" -- an order that is clicked and then found to be the wrong size is
+    not a thing you can undo by reading the output.
+    """
+    if not getattr(args, "confirm_demo", False):
+        return _Outcome(
+            EXIT_REFUSED,
+            "  no order was sent.\n"
+            "  `trade` can place a demo order, and it needs --confirm-demo to say so.\n"
+            "  Run it with --what-if first to see exactly what would be sent.",
+        )
+
+    if not args.signal.exists():
+        return _Outcome(EXIT_FAULT, f"ERROR: {args.signal} does not exist.")
+
+    try:
+        text = _read_text_any(args.signal)
+    except (OSError, ValueError) as exc:
+        return _Outcome(EXIT_FAULT, f"ERROR: {args.signal} could not be read: {exc}")
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        return _Outcome(EXIT_FAULT, f"ERROR: {args.signal} is not valid JSON: {exc}")
+
+    try:
+        signal = _signal_from(payload)
+    except (TypeError, ValueError, KeyError) as exc:
+        return _Outcome(EXIT_FAULT, f"ERROR: {args.signal} is not a usable signal: {exc}")
+
+    config = _config_from_env(args)
+
+    # The configuration gate, reported before the machine gate, because it is the
+    # one an operator can have forgotten about and `config` will confirm.
+    if config.dry_run or not config.execution_enabled:
+        missing = []
+        if not config.execution_enabled:
+            missing.append("BRIDGE_EXECUTION_ENABLED is false")
+        if config.dry_run:
+            missing.append("BRIDGE_DRY_RUN is true, and it overrides execution")
+        return _Outcome(
+            EXIT_REFUSED,
+            "  no order was sent. The configuration forbids it:\n"
+            + "".join(f"    - {item}\n" for item in missing)
+            + "  Both must change. `signal-to-trade-bridge config` shows the current values.",
+        )
+
+    from signal_to_trade_bridge.composition import CompositionRefusal as _Refusal
+    from signal_to_trade_bridge.live import build_live
+
+    # `mt5_terminal_path` is `Path | None` on the config, and `build_live` wants a
+    # `Path`. Checked rather than asserted: an unset terminal path has to produce a
+    # sentence an operator can act on, not an AttributeError from deep inside the
+    # bindings, and this is the last point where the message can still name the
+    # variable that is missing.
+    if config.mt5_terminal_path is None:
+        return _Outcome(
+            EXIT_FAULT,
+            "ERROR: no terminal path is configured. Set BRIDGE_MT5_TERMINAL_PATH -- the "
+            "bridge never launches a terminal, so it has to be told where the running "
+            "one is.",
+        )
+
+    try:
+        bridge = build_live(
+            config,
+            terminal=config.mt5_terminal_path,
+            data_path=config.mt5_data_path,
+        )
+    except _Refusal as exc:
+        return _Outcome(EXIT_FAULT, f"ERROR: the live path could not be built: {exc}")
+
+    # The decision, from the live pipeline. This is the same wiring an order would
+    # go through, which is the point of building the live side even for `--what-if`:
+    # a report of a *different* pipeline would be a report of a different thing.
+    decision = bridge.pipeline.process(signal)
+    lines = [
+        f"signal   {decision.signal_id}",
+        f"action   {decision.action.value}",
+        f"reason   {decision.reason}",
+        "",
+    ]
+    if decision.intent is not None:
+        intent = decision.intent
+        lines += [
+            f"  symbol     {intent.symbol} {intent.direction.value}",
+            f"  volume     {intent.volume}",
+            f"  entry      {intent.entry}",
+            f"  stop       {intent.stop_loss.price}  ({intent.stop_loss.distance})",
+            f"  target     {'none' if intent.take_profit is None else intent.take_profit.price}",
+            f"  risk       {intent.risk_amount}",
+            "",
+        ]
+
+    if getattr(args, "what_if", False):
+        lines += [
+            "  --what-if was given, so nothing was sent. The numbers above are what",
+            "  this signal would have sent, computed by the same wiring an order uses.",
+            "  Drop --what-if and keep --confirm-demo to place it.",
+        ]
+        return _Outcome(
+            _decision_code(decision), "\n".join(lines), {"decision": decision.to_dict()}
+        )
+
+    execution = decision.execution
+    if decision.action is DecisionAction.NO_TRADE:
+        return _Outcome(EXIT_REFUSED, "\n".join(lines), {"decision": decision.to_dict()})
+    if execution is None:
+        return _Outcome(
+            EXIT_REFUSED,
+            "\n".join([*lines, "  no order was sent: the decision carries no execution result."]),
+            {"decision": decision.to_dict()},
+        )
+
+    lines += [
+        f"  status     {execution.status}",
+        f"  message    {execution.message}",
+    ]
+    code = _decision_code(decision)
+    return _Outcome(code, "\n".join(lines), {"decision": decision.to_dict()})

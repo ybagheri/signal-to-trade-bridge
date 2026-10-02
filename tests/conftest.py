@@ -59,14 +59,38 @@ def project_root() -> Path:
     return PROJECT_ROOT
 
 
+@pytest.fixture(autouse=True)
+def _no_configuration_leaks() -> Iterator[None]:
+    """Guarantee that no test's configuration reaches the next test.
+
+    **The leak was found on the day this machine armed itself**, and it is worth
+    stating plainly because it is the most dangerous class of bug in this suite: a
+    test that reads the configuration seeds `os.environ` from the `.env` it finds
+    (`config_from_env` defaults to `apply=True`, which is the documented behaviour
+    and a genuine side effect). Tests that then assert the *shipped defaults* fail --
+    correctly, and for a reason three files away from the cause.
+
+    An autouse fixture rather than remembering to ask for `clean_environment` in each
+    test, because "remember to" is exactly what failed. It snapshots at the start of
+    **every** test, so the restore below is by definition the correct baseline, and
+    it also removes the class of bug rather than the two instances of it.
+    """
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 @pytest.fixture
 def clean_environment() -> Iterator[None]:
     """Restore ``os.environ`` after a test that modifies it.
 
-    Snapshot and restore rather than clearing, because a test that needs a clean
-    slate should not silently remove a developer's real settings for the rest of
-    the session. Restoring exactly what was there is the only version of this
-    that is safe to run in a shell somebody is also using.
+    Now redundant with the autouse fixture above, and **kept** because it is named in
+    a great many test signatures and because reading it tells you the test intends to
+    care about the environment. Removing it would be a large, mechanical diff for no
+    gain; the autouse fixture is the guarantee, this is the declaration of intent.
     """
     saved = dict(os.environ)
     try:

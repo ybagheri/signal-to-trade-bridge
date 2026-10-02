@@ -112,6 +112,33 @@ class AutoTradeLedger:
         except Exception as exc:  # broad on purpose: see the class docstring
             raise _unreadable(f"outcome for {key}", exc) from exc
 
+    def record_result(self, result: Any) -> None:
+        """Forward an upstream ``ExecutionResult`` straight through.
+
+        **Found by sending a real order.** ``ExecutionWorkflow._result`` calls
+        ``self.ledger.record_result(result)`` -- the *upstream* protocol, taking one
+        already-built result. This wrapper only offered :meth:`record_outcome`, which
+        takes three loose arguments, so the call raised ``AttributeError: no
+        attribute 'record_result'`` *after* the order had gone to the terminal.
+
+        The result was ``UNKNOWN`` and correctly so: an exception escaping the
+        recording path means the outcome is genuinely not known, and the one thing
+        the ledger exists to prevent is a retry against an order that may already be
+        live. So the system behaved properly and the integration was wrong.
+
+        The wrapper's whole job is to satisfy two protocols at once -- this project's
+        :class:`~signal_to_trade_bridge.ports.IdempotencyStore` and upstream's
+        ``ExecutionLedger`` -- and nothing tested the second one, because every test
+        passed a ledger straight through or used the fake executor. Naming the method
+        the collaborator actually calls is the fix; the alternative was for the
+        composition root to hand upstream the raw ``JsonExecutionLedger``, which would
+        have worked and given up the refusal behaviour the wrapper exists for.
+        """
+        try:
+            self._ledger.record_result(result)
+        except Exception as exc:  # broad on purpose: see the class docstring
+            raise _unreadable(f"result for {getattr(result, 'signal_id', '?')}", exc) from exc
+
     def _to_result(self, key: str, execution_id: str, outcome: Mapping[str, Any]) -> Any:
         from auto_trade.domain.enums import ExecutionStatus
         from auto_trade.domain.models import ExecutionResult
