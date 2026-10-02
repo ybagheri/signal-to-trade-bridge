@@ -754,26 +754,73 @@ adaptation.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ interfaces/     CLI, wiring, composition root                │
+│ cli/               doctor, check, signal, config            │
+│ composition.py     the wiring: the only place that knows    │
+│ live.py            every concrete class at the same time    │
 ├──────────────────────────────────────────────────────────────┤
-│ application/    ProcessSignal — the single use case          │
+│ application/       ProcessSignal — the single use case      │
+│                    DryRunReport, ExecutionEnvelope           │
 ├──────────────────────────────────────────────────────────────┤
-│ domain/         Signal, TradeIntent, RiskParameters,         │
-│                 PositionSize, TradeDecision, SymbolSpec,     │
-│                 AccountBalance, and the pure calculations    │
-│                 (sizing, RR, validation)                      │
+│ configuration/     BridgeConfig, built from the environment  │
+│ infrastructure/    structured logging and the event         │
+│                    vocabulary                               │
 ├──────────────────────────────────────────────────────────────┤
-│ ports/          Protocols: SignalSource, MarketDataProvider, │
-│                 AccountProvider, SymbolSpecProvider,         │
-│                 TradeExecutor, IdempotencyStore              │
+│ domain/            Signal, TradeIntent, RiskParameters,     │
+│                    PositionSize, TradeDecision, SymbolSpec, │
+│                    AccountBalance, and the pure calculations│
 ├──────────────────────────────────────────────────────────────┤
-│ adapters/       albrooks/  auto-trade/  mt5/  fake/           │
+│ ports/             Protocols: SignalSource, MarketDataProvider, │
+│                    AccountProvider, SymbolSpecProvider,     │
+│                    TradeExecutor, IdempotencyStore,         │
+│                    KillSwitch                               │
+├──────────────────────────────────────────────────────────────┤
+│ adapters/          albrooks/  auto-trade/  mt5/  fake/     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Dependency direction is strictly inward. `domain` imports nothing from any other
-layer, and nothing from `adapters/`. Every external project is reached through a
-protocol in `ports/`, so an upstream change is contained in one adapter.
+**This diagram is Phase 13's, not Phase 0's.** The version written during the audit
+listed five layers and no others, and the code now has eight plus two root modules.
+`cli/` was called `interfaces/`, and `configuration/`, `infrastructure/`,
+`composition.py` and `live.py` were not in the picture at all. That is not a
+criticism of the original — the audit could not know what thirteen phases would
+require — but a diagram that has drifted is worse than none, because it is the
+thing a new reader trusts.
+
+**Every arrow in this diagram is now checked by a test.** `tests/unit/test_layering.py`
+walks the import graph and fails on any edge not in the permission table, and
+`tests/unit/test_domain_isolation.py` separately guards the domain, which is the
+one direction whose violation would break the suite on a machine without the private
+upstream repositories. A layer on disk that is not in the permission table fails the
+same suite, so a new package cannot be added without deciding what it may import.
+
+Dependency direction is inward for business capabilities. Two edges deliberately are
+not, and both are named rather than tolerated quietly:
+
+| Edge | Why |
+|---|---|
+| `application` → `infrastructure.logging` | `Event` is a vocabulary, not a service. See below. |
+| `adapters` → `infrastructure.logging` | Same. An adapter translating somebody else's plan has to be able to say what it did. |
+
+**On the logging edge.** `application` imports `Event`, `StructuredLogger` and
+`get_logger` from a concrete implementation, and `ports/` has no logging Protocol to
+make that legitimate. The obvious fix is a Protocol, and the reason it was not
+applied is worth recording: a Protocol with one implementation and no plausible
+second candidate is the dependency-inversion equivalent of ceremony. What *is*
+forbidden, by name, is `configure_logging` — the part that mutates global handler
+state. Application code that reconfigures logging is the leak this exception must not
+become, and `test_layering.py` fails if it appears.
+
+`domain` imports nothing from any other layer, and nothing from `adapters/`. Every
+external project is reached through a protocol in `ports/`, so an upstream change is
+contained in one adapter.
+
+`composition.py` and `live.py` sit outside the diagram on purpose: they are the
+composition root, and their entire job is to know every concrete class at once. That
+is what makes the graph a lattice rather than a strict hierarchy. The consequence
+being guarded is that **nothing except `cli/` and the package root may import them** —
+if `application.process_signal` imported `composition`, the pipeline would be
+assembling its own collaborators, which is the inversion this architecture exists to
+prevent, and no other test here would notice.
 
 `domain` uses `Decimal` for prices, volumes and money. Not `float`. The upstream
 projects use `float` (albrooks) and `Decimal` (auto-trade) respectively, and

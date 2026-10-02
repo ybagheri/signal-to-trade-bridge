@@ -158,7 +158,8 @@ def _doctor(args: argparse.Namespace) -> _Outcome:
             problems.append(f"{name} is not installed, and {why}")
 
     # The terminal, without touching it. `initialize` connects; nothing here launches.
-    terminal = _config_from_env(args).mt5_terminal_path
+    config = _config_from_env(args)
+    terminal = config.mt5_terminal_path
     report["terminal_path"] = str(terminal) if terminal else None
     if terminal is None:
         problems.append(
@@ -167,6 +168,27 @@ def _doctor(args: argparse.Namespace) -> _Outcome:
         )
     elif not Path(terminal).is_file():
         problems.append(f"no terminal at {terminal}")
+
+    # The data directory, and the argument for reporting it is that it is the single
+    # most error-prone value in the setup: a hash-named folder under
+    # `MetaQuotes\Terminal`, one per installation, which cannot be guessed and which
+    # `docs/setup.md` tells the reader to go and find by hand. The terminal path is
+    # printed above, so leaving this one out made the command describe half of what
+    # the operator configured -- and the half it omitted is the half they had to
+    # look up.
+    #
+    # Reported, and checked, but *not* treated as fatal on its own: a build can be
+    # read from the executable alone, so an absent data directory is a loss of a
+    # confirmation rather than a machine that cannot run.
+    data = config.mt5_data_path
+    report["data_path"] = str(data) if data else None
+    if data is not None and not Path(data).is_dir():
+        problems.append(
+            f"no MT5 data directory at {data}. This is the hash-named folder under "
+            f"MetaQuotes\\Terminal, not the terminal's install directory; the build can "
+            f"still be read from the executable, so this is a lost confirmation rather "
+            f"than a fault."
+        )
 
     control_ids = _control_id_report(args)
     report["control_ids"] = control_ids
@@ -201,10 +223,31 @@ def _control_id_report(args: argparse.Namespace) -> dict[str, Any]:
 
 def _render_doctor(report: dict[str, Any]) -> str:
     lines = ["signal-to-trade-bridge", f"  version            {report['version']}", ""]
+
+    # **The problems come first, and they used to not be printed at all.** The
+    # function built this list, carefully, with the reason attached to each entry --
+    # and then rendered only the status block below, so a machine with a typo in
+    # BRIDGE_MT5_TERMINAL_PATH exited 2 and said nothing about the missing file,
+    # leaving the operator to read a complaint about control identifiers instead.
+    # A diagnostic command that detects a problem and does not report it is worse
+    # than one that stays silent, because the exit code is then a fact with no
+    # explanation attached.
+    #
+    # Before the status block rather than after: the person running `doctor` wants
+    # the answer first, and the `ok` / `REFUSED` marks below are corroboration for a
+    # conclusion they have already been given.
+    problems = report.get("problems") or []
+    if problems:
+        lines.append("  cannot run here")
+        lines += [f"    - {problem}" for problem in problems]
+        lines.append("")
+
     for name in ("MetaTrader5", "auto_trade"):
         mark = "ok" if report.get(name) else "MISSING"
         lines.append(f"  {name:<18} {mark}")
     lines.append(f"  terminal           {report.get('terminal_path') or 'not configured'}")
+    if report.get("data_path") is not None:
+        lines.append(f"  data directory     {report['data_path']}")
 
     control = report.get("control_ids") or {}
     usable = control.get("usable")

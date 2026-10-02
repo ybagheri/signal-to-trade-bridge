@@ -134,7 +134,7 @@ def build_bridge(
 
     # Opened before anything that writes, and refused rather than replaced: a ledger
     # that cannot be read must stop the process while there is still nothing to undo.
-    ledger = _ledger(config, bindings)
+    ledger = resolve_ledger(config, bindings)
 
     pipeline = ProcessSignal(
         risk,
@@ -207,12 +207,20 @@ def _auto_trade_bindings(supplied: AutoTradeBindings | None) -> AutoTradeBinding
         return None
 
 
-def _ledger(config: BridgeConfig, bindings: AutoTradeBindings | None) -> Any:
+def resolve_ledger(config: BridgeConfig, bindings: AutoTradeBindings | None) -> Any:
     """The idempotency ledger, or a refusal.
 
     Opened even on a dry run, and deliberately: a dry run is exactly when somebody
     wants to know the ledger is readable, and finding out at the moment the first
     real order is attempted is the worst time to discover it is not.
+
+    **Public, and named without an underscore, because `live.py` needs it.** It was
+    `_ledger` and `live.py` imported the private name, which is the kind of coupling
+    that looks harmless and then quietly becomes load-bearing: renaming or
+    restructuring this function would have broken the live assembly with no test
+    pointing at the seam. Making it public says what it actually is -- the single
+    place that decides whether an idempotency store is available, and refuses if not
+    -- and gives the live side a name to depend on instead of a private one.
     """
     if bindings is None:
         raise CompositionRefusal(

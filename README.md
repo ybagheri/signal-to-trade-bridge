@@ -69,10 +69,10 @@ either.
 | 10 | End-to-end integration | 𧀅 complete |
 | 11 | MT5 / demo validation (isolated, opt-in) | ▸ partial — blocked on control ids |
 | 12 | Documentation, CLI, public API | 𧀅 complete |
-| 13 | Final architecture review | ⬜ |
+| 13 | Final architecture review | 𧀅 complete |
 
-**1027 tests passing, 97% coverage.** Lint, format, type check and the
-domain-isolation check all clean. The suite runs **without the upstream projects
+**1189 tests passing, 98% coverage.** Lint, format, type check, the
+domain-isolation check and a full layer-graph check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
 

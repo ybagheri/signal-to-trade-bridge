@@ -54,7 +54,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from signal_to_trade_bridge.composition import Bridge, CompositionRefusal, _ledger
+from signal_to_trade_bridge.composition import (
+    Bridge,
+    CompositionRefusal,
+    resolve_ledger,
+)
 from signal_to_trade_bridge.configuration.config import BridgeConfig
 
 __all__ = [
@@ -220,7 +224,7 @@ def build_live(
     symbols = MT5SymbolSpecProvider(live_bindings)
     risk = RiskService(account, symbols)
 
-    ledger = _ledger(config, resolved)
+    ledger = resolve_ledger(config, resolved)
     kill_switch, audit, workflow = _live_side(resolved, config, ledger)
     return _finish(config, risk, account, symbols, ledger, resolved, kill_switch, audit, workflow)
 
