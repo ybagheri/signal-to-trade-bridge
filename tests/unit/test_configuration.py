@@ -25,15 +25,32 @@ from signal_to_trade_bridge.domain.errors import ConfigurationError
 
 
 class TestDefaults:
-    def test_a_fresh_checkout_cannot_execute(self, clean_environment: None) -> None:
+    """What the *code* defaults to, with nothing around it.
+
+    Every test here needs the working directory moved as well as the environment
+    cleared, because `config_from_env()` finds `.env` by path. Clearing
+    `os.environ` alone is not enough, and the difference showed up on the day this
+    machine armed itself: these tests started failing not because the defaults
+    changed but because a file in the repository root said otherwise. An assertion
+    about the shipped default that fails when a developer configures their machine
+    is testing the developer, not the default.
+    """
+
+    def test_a_fresh_checkout_cannot_execute(
+        self, clean_environment: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         # The single most important default in the project. A misconfigured or
         # absent environment must produce a bridge that cannot trade.
+        monkeypatch.chdir(tmp_path)
         config = config_from_env(apply=False)
         assert config.execution_enabled is False
         assert config.dry_run is True
         assert not config.can_execute
 
-    def test_risk_defaults_to_half_a_percent_at_one_to_one(self, clean_environment: None) -> None:
+    def test_risk_defaults_to_half_a_percent_at_one_to_one(
+        self, clean_environment: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
         config = config_from_env(apply=False)
         assert config.risk_percent == Decimal("0.5")
         assert config.reward_risk_ratio == Decimal("1.0")
@@ -255,8 +272,13 @@ class TestDotenv:
         assert config_from_env(env_file=env_file).risk_percent == Decimal("1.0")
 
     def test_the_file_is_used_when_nothing_else_is_set(
-        self, tmp_path: Path, clean_environment: None
+        self, tmp_path: Path, clean_environment: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        env_file = tmp_path / ".env"
+        # Run from a directory with no `.env` of its own, so the value below can only
+        # have come from the file that was passed in. Without this it also read the
+        # repository's, and a machine that had armed itself made this test fail for
+        # a reason that had nothing to do with what it is checking.
+        monkeypatch.chdir(tmp_path)
+        env_file = tmp_path / "elsewhere.env"
         env_file.write_text("BRIDGE_RISK_PERCENT=0.75\n", encoding="utf-8")
         assert config_from_env(env_file=env_file).risk_percent == Decimal("0.75")

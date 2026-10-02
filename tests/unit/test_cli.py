@@ -129,23 +129,49 @@ class TestTheExitCodeContract:
 
 
 class TestDoctor:
-    def test_it_reports_the_version(self) -> None:
+    # Every test here reads the configuration, and `config_from_env(apply=True)`
+    # seeds `os.environ` from whatever `.env` it finds. Without `clean_environment`
+    # these leave the developer's machine configuration behind for every test that
+    # runs afterwards -- and the tests that broke were the ones asserting the shipped
+    # defaults, which then failed for a reason three files away from the cause.
+    def test_it_reports_the_version(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         code, output = _run("doctor")
         assert "version" in output
         # A machine without a terminal configured cannot run the bridge, and that is
         # a fault rather than a refusal.
         assert code in (EXIT_OK, EXIT_FAULT)
 
-    def test_it_names_a_missing_dependency(self) -> None:
+    def test_it_names_a_missing_dependency(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         _code, output = _run("doctor")
         # Whichever machine this runs on, the output must *say something* about each
         # dependency rather than being silent about it.
         assert "MetaTrader5" in output
         assert "auto_trade" in output
 
-    def test_it_mentions_the_control_ids(self) -> None:
+    def test_it_mentions_the_control_ids(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
         # The one refusal no configuration can clear, so `doctor` has to surface it
         # or an operator learns it from a failed trade instead.
+        _isolate(monkeypatch, tmp_path, request)
         _code, output = _run("doctor")
         assert "control ids" in output
 
@@ -266,7 +292,9 @@ class TestCheck:
         path.write_bytes(b"\xef\xbb\xbf" + b'{"symbol": "EURUSD"}')
         assert "EURUSD" in _read_text_any(path)
 
-    def test_a_genuinely_binary_file_is_refused(self, tmp_path: Path) -> None:
+    def test_a_genuinely_binary_file_is_refused(
+        self, clean_environment: None, tmp_path: Path
+    ) -> None:
         # The last encoding tried has to be one that can fail, or corrupt input
         # becomes nonsense instead of a refusal.
         path = tmp_path / "s.bin"
@@ -275,26 +303,114 @@ class TestCheck:
             _read_text_any(path)
 
 
+def _isolate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Point the configuration at nothing but this test's own values.
+
+    Four things, and all four are needed:
+
+    * every ``BRIDGE_`` variable cleared, so the developer's shell is not the
+      subject under test;
+    * ``BRIDGE_LOG_DIR`` pointed inside ``tmp_path``, so a run cannot write into the
+      repository's ``logs/`` and pick up a previous run's ledger;
+    * **the working directory moved**, because `config_from_env` reads ``.env`` from
+      it. Skipping that is why the first version of the defaults test read a real
+      ``.env``: clearing the environment is not enough when the file is found by
+      path.
+    * **and the environment restored afterwards**, which is what `monkeypatch`
+      already does for the variables it set -- but not for the ones the *code* set.
+      `config_from_env(apply=True)` seeds `os.environ` from the `.env` it finds, and
+      a test that reads the configuration therefore leaves the developer's whole
+      machine configuration behind for every test that runs after it. The
+      `clean_environment` fixture exists for exactly that, and these tests take it.
+    """
+    import os
+
+    for name in [n for n in os.environ if n.startswith("BRIDGE_")]:
+        monkeypatch.delenv(name, raising=False)
+    # And a finalizer, because `monkeypatch` only undoes what *it* set. The command
+    # being tested seeds `os.environ` from the `.env` it finds, and a test that does
+    # not restore that hands the developer's machine configuration to every test that
+    # runs next. It was found by two tests in another file failing on the day this
+    # machine armed itself, and neither had anything to do with the CLI.
+    before = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(before)))
+
+    monkeypatch.setenv("BRIDGE_LOG_DIR", str(tmp_path / "logs"))
+    empty = tmp_path / "elsewhere"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.chdir(empty)
+
+
 class TestConfig:
-    def test_it_prints_the_configuration_as_json(self) -> None:
+    def test_it_prints_the_configuration_as_json(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         code, output = _run("config")
         assert code == EXIT_OK
         payload = json.loads(output)
         assert "execution_enabled" in payload
         assert "dry_run" in payload
 
-    def test_the_default_configuration_cannot_execute(self) -> None:
+    def test_the_shipped_defaults_cannot_execute(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
         # The single most important line in the output, and the reason `config`
         # exists: a caller guessing why the bridge is not trading will eventually
         # guess "so it is safe to turn on execution_enabled", and it is not.
+        #
+        # **Run with the environment cleared and an empty log directory**, because
+        # this is about what the *code* defaults to, not about how this machine
+        # happens to be configured. The first version of this test read whatever
+        # `.env` was lying around, so it failed on the day execution was turned on --
+        # asserting that the default is safe, and failing *because* the machine was
+        # no longer default. The assertion was right and the test was about the wrong
+        # thing.
+        _isolate(monkeypatch, tmp_path, request)
         _code, output = _run("config")
         payload = json.loads(output)
         assert payload["execution_enabled"] is False
         assert payload["dry_run"] is True
 
-    def test_a_log_dir_flag_wins_over_the_environment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_machine_can_arm_itself_and_config_says_so(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
     ) -> None:
+        # The other half, and the reason the test above had to be rewritten rather
+        # than deleted. Arming is a deliberate act recorded in a `.env` that is
+        # gitignored, and `config` reporting it is how an operator confirms it
+        # happened -- so the command must be able to say `true` as honestly as `false`.
+        _isolate(monkeypatch, tmp_path, request)
+        monkeypatch.setenv("BRIDGE_EXECUTION_ENABLED", "true")
+        monkeypatch.setenv("BRIDGE_DRY_RUN", "false")
+        _code, output = _run("config")
+        payload = json.loads(output)
+        assert payload["execution_enabled"] is True
+        assert payload["dry_run"] is False
+
+    def test_a_log_dir_flag_wins_over_the_environment(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         # A flag that lost to an env var would be a flag that silently did nothing,
         # and a developer pointing the ledger somewhere else to read it is exactly
         # the case where that matters. Compared as *paths*, not as substrings of the
@@ -306,13 +422,25 @@ class TestConfig:
         assert shown == tmp_path / "from-flag"
 
     def test_the_environment_is_used_when_no_flag_is_given(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
     ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         monkeypatch.setenv("BRIDGE_LOG_DIR", str(tmp_path / "from-env"))
         _code, output = _run("config")
         assert Path(json.loads(output)["log_directory"]) == tmp_path / "from-env"
 
-    def test_a_windows_path_survives_being_printed(self, tmp_path: Path) -> None:
+    def test_a_windows_path_survives_being_printed(
+        self,
+        clean_environment: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        _isolate(monkeypatch, tmp_path, request)
         # JSON escapes a backslash **once**, so `C:\Users` is correctly rendered as
         # `C:\\Users`. That is not the bug. The bug -- the one this guards -- is
         # escaping a second time on the way in, which writes four backslashes where
