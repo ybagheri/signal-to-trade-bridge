@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 
 from signal_to_trade_bridge.domain.enums import TakeProfitSource
 from signal_to_trade_bridge.domain.errors import ConfigurationError
@@ -254,6 +255,10 @@ class BridgeConfig:
     #: The terminal's data directory, where the MQL5 file bridge and the
     #: position-snapshot indicator write.
     mt5_data_path: Path | None = None
+    #: What MT5 calls this instance in its title bar. The execution project's
+    #: window manager matches on it, so a wrong value means it cannot find the
+    #: window -- and a name borrowed from another machine is a wrong value.
+    mt5_instance_name: str = "Alpari-MT5-Demo"
     #: Bars to request per analysis.
     bar_count: int = 300
     #: Log level for the bridge's own structured events.
@@ -279,6 +284,33 @@ class BridgeConfig:
         to be true regardless of which value a caller changed last.
         """
         return self.execution_enabled and not self.dry_run
+
+    def terminal_profile(self, *, data_path: Path | None = None) -> Any:
+        r"""The execution project's ``TerminalProfile`` for this machine.
+
+        The four fields are the window the terminal adapter drives: where the
+        executable is, where its data lives, what MT5 calls the instance, and a name
+        for the profile itself.
+
+        **The paths are read from this configuration and nowhere else.** The
+        execution project's own defaults are absolute paths on a *different*
+        machine -- ``C:\Program Files\Alpari MT5_2\...`` and a terminal hash from
+        another user's profile -- and using them here would mean a bridge on this
+        machine driving a terminal that does not exist on it. That is Known Issue 6,
+        and this is the seam where it would bite.
+
+        ``Any`` rather than a named type because the profile class belongs to the
+        private package, which this repository imports lazily. Naming it here would
+        make the configuration module import the thing it exists to configure.
+        """
+        from auto_trade.domain.models import TerminalProfile
+
+        return TerminalProfile(
+            name=self.mt5_instance_name or "alpari-mt5",
+            terminal_path=str(self.mt5_terminal_path or ""),
+            data_path=str(data_path or self.mt5_data_path or ""),
+            instance_name=self.mt5_instance_name,
+        )
 
     def __repr__(self) -> str:
         # Explicit, because the dataclass default would print every field. This
@@ -371,6 +403,7 @@ def config_from_env(*, env_file: Path | None = None, apply: bool = True) -> Brid
             require_running_terminal=_flag(f"{p}REQUIRE_RUNNING_TERMINAL", True),
             log_directory=_path(f"{p}LOG_DIR", Path("logs")) or Path("logs"),
             mt5_terminal_path=_path(f"{p}MT5_TERMINAL_PATH", None),
+            mt5_instance_name=os.getenv(f"{p}MT5_INSTANCE_NAME", "Alpari-MT5-Demo"),
             mt5_data_path=_path(f"{p}MT5_DATA_PATH", None),
             # `or 300` would be wrong here: a configured 0 is falsy, so the
             # `or` would silently replace the caller's value with the default and

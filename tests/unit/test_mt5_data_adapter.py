@@ -698,8 +698,26 @@ class TestTheBindingsBoundary:
             f"running terminal; it never starts one."
         )
 
-    def test_the_error_names_the_package_and_the_install_command(self) -> None:
+    def test_the_error_names_the_package_and_the_install_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # "No module named MetaTrader5" tells an operator nothing about what to do.
+        #
+        # Reached with a *hidden* module rather than by relying on the package being
+        # absent. Phase 11 installed `MetaTrader5` on this machine -- correctly, since
+        # the live tests need it -- and that turned this test into a test of whichever
+        # failure happened to come first. A test whose subject is "the package is not
+        # installed" has to be able to arrange that itself, on any machine.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def hide(name: str, *args: object, **kwargs: object) -> object:
+            if name == "MetaTrader5":
+                raise ImportError("No module named 'MetaTrader5'")
+            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(builtins, "__import__", hide)
         with pytest.raises(MT5Unavailable) as caught:
             bindings_module.load_bindings()
         message = str(caught.value)
