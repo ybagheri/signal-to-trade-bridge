@@ -120,6 +120,29 @@ duplicate on a live pipeline would reach the executor before the ledger was aske
 whose recording failed must still be recorded, and this is the outcome that most needs
 one.
 
+### Phase 10, and what the assembly is for
+
+`build_bridge()` assembles the MT5 providers, the position reader, the ledger, the
+preflight and the pipeline — and **refuses the live path outright**:
+
+> execution is enabled and dry-run is off, so this bridge would place real orders —
+> but the live execution side is assembled by Phase 11 and not yet by this module.
+> Refusing rather than degrading to a dry run, because a silent degradation is how an
+> operator's setting gets ignored.
+
+So the shape of the whole system is now one call:
+
+```python
+bridge = build_bridge(BridgeConfig())  # cannot execute
+decision = bridge.pipeline.process(signal)  # DRY_RUN, with the report
+```
+
+**And the signal's identity is repaired on the way in.** A reading with neither
+`bar_index` nor `bar_time` gets the bar it was actually analysed on, recovered from
+the bars the adapter supplied — because that is knowable at exactly one place, and a
+refusal there would be a refusal of something recoverable. Only a reading whose
+*series* also says nothing is refused (`SIGNAL_BAR_UNKNOWN`).
+
 ### The one thing that can still go wrong
 
 `compute_signal_id` hashes `(symbol, timeframe, bar_index, bar_time, action, direction,

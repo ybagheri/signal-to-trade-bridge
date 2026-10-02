@@ -184,6 +184,12 @@ class RejectionReason(StrEnum):
     SIGNAL_SYMBOL_INVALID = "SIGNAL_SYMBOL_INVALID"
     SIGNAL_ENTRY_INVALID = "SIGNAL_ENTRY_INVALID"
     SIGNAL_EXPIRED = "SIGNAL_EXPIRED"
+    #: Phase 10. The engine reported no bar, so the reading has no bar in its
+    #: identity, and two such readings would share one ``signal_id`` -- the ledger
+    #: would then refuse a real second trade as a duplicate. Refused at the source,
+    #: where the bars the analysis ran on are still in hand and the identity can be
+    #: recovered; see ``AlBrooksSignalSource._guard_bar_identity``.
+    SIGNAL_BAR_UNKNOWN = "SIGNAL_BAR_UNKNOWN"
 
     # -- stop loss -------------------------------------------------------
     NO_VALID_STOP = "NO_VALID_STOP"

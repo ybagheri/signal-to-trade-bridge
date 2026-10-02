@@ -55,23 +55,23 @@ either.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Repository audit, architecture, integration contracts | ✅ complete |
-| 1 | Project foundation, packaging, configuration, test harness | ✅ complete |
-| 2 | Al Brooks signal adapter | ✅ complete |
-| 3 | Stop, take-profit and validation policies | ✅ complete |
-| 4 | Risk management and position sizing | ✅ complete |
-| 5 | 1:1 risk/reward take-profit policy | ✅ complete |
-| 6 | Trade validation pipeline | ✅ complete |
-| 7 | MT5 account/symbol adapter | ✅ complete |
-| 7b | auto-trade execution adapter | ✅ complete |
+| 0 | Repository audit, architecture, integration contracts | 𧀅 complete |
+| 1 | Project foundation, packaging, configuration, test harness | 𧀅 complete |
+| 2 | Al Brooks signal adapter | 𧀅 complete |
+| 3 | Stop, take-profit and validation policies | 𧀅 complete |
+| 4 | Risk management and position sizing | 𧀅 complete |
+| 5 | 1:1 risk/reward take-profit policy | 𧀅 complete |
+| 6 | Trade validation pipeline | 𧀅 complete |
+| 7 | MT5 account/symbol adapter | 𧀅 complete |
+| 7b | auto-trade execution adapter | 𧀅 complete |
+| 8 | Dry run / simulation mode | 𧀅 complete |
 | 9 | Idempotency and duplicate protection | 𧀅 complete |
-| 10 | End-to-end integration | ▸ next |
-| 10 | End-to-end integration | ⬜ |
-| 11 | MT5 / demo validation (isolated, opt-in) | ⬜ |
+| 10 | End-to-end integration | 𧀅 complete |
+| 11 | MT5 / demo validation (isolated, opt-in) | ▸ next |
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**920 tests passing, 98% coverage.** Lint, format, type check and the
+**967 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.

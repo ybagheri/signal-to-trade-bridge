@@ -24,14 +24,14 @@ policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
 project that calls the others. Phase 7 built the **MT5 data adapter** and the
 **execution adapter** — the last things between the pipeline and a real order.
 
-**920 tests passing, 98% coverage.** Lint, format, type check and the
+**967 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite still runs **without `albrooks`**
 **or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
-Last completed phase: 9
-Current phase:       10 — end-to-end integration
-Next phase:          10 — wire the composition root and prove it end to end
+Last completed phase: 10
+Current phase:       11 — MT5 / demo validation, opt-in
+Next phase:          11 — the live side: the terminal adapter, behind an opt-in
 ```
 
 ---
@@ -48,7 +48,7 @@ Next phase:          10 — wire the composition root and prove it end to end
 - [x] **Phase 7** — MT5 data adapter and the `auto-trade` execution adapter, both **done**
 - [x] Phase 8 — Dry run reporting
 - [x] **Phase 9** — Idempotency, and the envelope that made it safe
-- [ ] Phase 10 — End-to-end integration
+- [x] **Phase 10** — End-to-end integration, and the composition root
 - [ ] Phase 11 — MT5 / demo validation
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
@@ -558,6 +558,106 @@ still matches and the same signal id is refused with `"duplicate signal id"`.
 `contains` describes what a *new* attempt would meet. But an operator who retries on
 `is_retryable` will be refused, and pretending otherwise would be worse than the
 refusal — so it is in the port's docstring, in `docs/risk-management.md`, and here.
+
+### What Phase 10 Built
+
+```
+composition.py            Bridge, CompositionRefusal, build_bridge()
+adapters/albrooks/
+  source.py                _guard_bar_identity(), _newest_bar()
+domain/enums.py            SIGNAL_BAR_UNKNOWN
+tests/unit/
+  test_composition.py           31 tests
+  test_signal_bar_identity.py   16 tests
+```
+
+**Nine phases built the pieces and every one of them was tested against a
+stand-in. This is the first place they are wired to each other** -- and the three
+things only an assembly can find are: a wiring that is wrong while every individual
+component passes, the default configuration's inability to execute *behaviourally*
+rather than as a flag someone reads, and whether the refusals compose.
+
+### The `signal_id` collapse is closed, and it is a repair rather than a refusal
+
+Phase 9 left the decision to here. The answer is better than refusing: the bar is
+**knowable at exactly one place** -- the adapter that read the bars and asked the
+engine to analyse them -- and at that point the fallback bars are still in hand.
+
+So `_guard_bar_identity` does not refuse. It recovers:
+
+```
+engine reported a bar (index >= 0 OR time is not None)  ->  left exactly as it was
+neither, and the series has them                        ->  the series answers
+neither, and the series has neither                     ->  SIGNAL_BAR_UNKNOWN
+```
+
+**"Left exactly as it was" includes the mixed case.** A signal with
+`bar_index=-1` and a real `bar_time` is *not* repaired, because either field alone
+separates two readings and repairing the index would mix the engine's authority with
+ours in one key. When the engine said something, it wins; the recovery only fills a
+total blank.
+
+The index is the **position from the end**, not from the start, because the engine
+indexes that way and the two must agree -- a recovery that disagreed would put the
+reading on a bar the engine never saw, which is worse than refusing.
+
+### The composition root, and why the live path is refused rather than degraded
+
+`build_bridge` assembles the MT5 providers, the position reader, the ledger, the
+preflight and the pipeline, and **refuses the live path outright**:
+
+> execution is enabled and dry-run is off, so this bridge would place real orders --
+> but the live execution side is assembled by Phase 11 and not yet by this module.
+> Refusing rather than degrading to a dry run, because a silent degradation is how an
+> operator's setting gets ignored.
+
+That sentence is the phase. An operator who enables execution today is told so,
+rather than handed a pipeline that quietly reports and looks like it obeyed.
+
+**The ledger is opened before anything that could write**, and refused rather than
+replaced. ``JsonExecutionLedger`` raises on a file it cannot read, and an unreadable
+ledger must stop the process while there is still nothing to undo. It is opened even
+on a dry run, deliberately: a dry run is exactly when somebody wants to know the
+ledger is readable, and finding out at the first real order is the worst time.
+
+### What the composition root deliberately does not assemble
+
+* **The terminal adapter and the ``ExecutionWorkflow`` with it.** Both need the
+  private execution package, and making a *dry run* depend on it would mean a missing
+  dependency silently disables reporting rather than trading. The two are independent
+  and conflating them is the mistake.
+* **The signal source.** The bridge reads signals; choosing them would be a strategy
+  in disguise.
+* **A CLI.** ``cli/`` stays empty until Phase 12.
+
+### Two things this phase's tests found, both about assumptions
+
+**The stub was shaped like the wrong thing.** The first version of this file's
+bindings double carried the *bridge's* ``SymbolSpec`` fields, and every test failed
+with ``SYMBOL_SPEC_UNAVAILABLE``. The adapter maps ``trade_contract_size`` and the
+rest one for one, so a double carrying ``contract_size`` tests a conversion that does
+not happen. **That failure is the argument for this file existing**: every other test
+drives a real adapter with a correct double, and only an assembly exercises the seam
+where a mis-shaped double looks like a broken adapter.
+
+**The preflight cannot show a disagreement through the composition root.** The root
+builds the preflight's limits from the *bridge's* ``allowed_symbols``, so the two
+projects agree by construction -- deliberately, since a root that configured the
+downstream limits independently would be a second policy nobody maintains. The test
+that claimed to prove a `GBPJPY` refusal was therefore asserting something untrue,
+and was corrected to state the limitation rather than kept for its green tick. **The
+genuine disagreement tests live in ``test_dry_run.py``, where the caller supplies the
+limits.**
+
+### The concurrency limit, seen through the composition
+
+Phase 7's residual case is now visible from the outside. Without a data path the
+count is zero, so a limit of **one** admits a trade on a number that was never read --
+and the report still says the count was not read. With a limit of **zero** the trade
+is refused at the concurrency gate. And with a *dead terminal* the refusal moves
+earlier, to the account gate, as soon as the limit is configured. Three cases, three
+different refusals, and the safe configuration -- leave the limit unset -- is stated
+in `docs/risk-management.md` rather than discovered.
 
 ### What cannot be verified here at all
 
@@ -1564,7 +1664,7 @@ decide to trade and cannot yet trade.*
 
 ## Tests
 
-**925 collected, 920 passed, 5 skipped in about 4 seconds.** The suite runs
+**972 collected, 967 passed, 5 skipped in about 5 seconds.** The suite runs
 **without `albrooks` or `MetaTrader5` installed** and without a terminal — the
 MT5 adapter takes its bindings by injection, which is what makes that possible.
 
@@ -1594,7 +1694,7 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **925 collected, 920 passed, 5 skipped** | |
+| **Total** | **972 collected, 967 passed, 5 skipped** | |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1623,7 +1723,7 @@ The full gate, all clean:
 ruff check .            All checks passed!
 ruff format --check .   72 files already formatted
 mypy                    Success: no issues found in 37 source files
-pytest                  920 passed, 5 skipped
+pytest                  967 passed, 5 skipped
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -1803,18 +1903,30 @@ it would say.
 See *What Phase 9 Built* above. The envelope, the ledger over the real JSON ledger,
 the two-phase port, and the `ExecutionRequest.take_profit` fix Phase 8 left open.
 
-#### Phase 10 — end-to-end integration
+#### Phase 10 — end-to-end integration  ← **done**
 
-**It has to decide the `signal_id` collapse first.** Phase 9 found that a reading with
-neither `bar_index` nor `bar_time` produces a key with no bar in it, so two of them
-hash alike and the second is refused as a duplicate. Refusing such a signal is
-fail-closed and correct, and it is the change Phase 10 should make — but it belongs
-where the source of the signal is known, which is a composition root.
+See *What Phase 10 Built* above. The composition root, and the `signal_id` repair
+Phase 9 left for here.
 
-Phase 10 is also where the composition root is assembled: the MT5 account and symbol
-providers, the position reader, the `ExecutionWorkflow` with its terminal adapter, the
-ledger, the kill switch, the audit log, and `ProcessSignal` with its envelope wired.
-Phase 11 is the live demo, opt-in only; 12 and 13 as laid out.
+#### Phase 11 — MT5 / demo validation
+
+**Opt-in, and the only phase permitted to open a terminal or place an order.** The
+composition root refuses the live path precisely so this phase has somewhere to go:
+it builds the terminal adapter, assembles the `ExecutionWorkflow` with it, and
+removes the refusal.
+
+Three things Phase 11 inherits and must not weaken:
+
+* **the default configuration still cannot execute.** Enabling it is a separate,
+  explicit act, and the root's refusal is what makes "we have not tried that yet" a
+  true statement.
+* **Known Issue 5 is confirmed, not suspected.** The terminal runs build **6230**;
+  `auto-trade`'s control ids were measured on **6184**. Re-measure every id before
+  anything is clicked.
+* **Nothing outside Phase 11 opens a terminal.** Reading the published position
+  snapshot is not opening one, and Phase 7 did that read-only.
+
+Phases 12 and 13 as laid out.
 ## Open Questions
 
 ### Resolved
@@ -2306,7 +2418,7 @@ touched an adapter — and now partly relevant to Phase 7:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **920 tests should pass, 5 skipped.** If
+   virtual environment is not set up. **967 tests should pass, 5 skipped.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
