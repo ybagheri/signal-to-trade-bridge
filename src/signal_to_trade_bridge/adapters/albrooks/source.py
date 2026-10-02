@@ -20,7 +20,7 @@ stub analyzer; the MT5 data adapter arrives in Phase 7.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from signal_to_trade_bridge.adapters.albrooks.mapper import (
@@ -180,8 +180,83 @@ class AlBrooksSignalSource:
             ) from exc
 
         outcome = map_result_to_signal(result)
+        self._guard_bar_identity(outcome, bars)
         self._log_outcome(normal_symbol, timeframe, outcome)
         return outcome
+
+    def _guard_bar_identity(self, outcome: AnalysisOutcome, bars: object) -> None:
+        """Refuse a signal whose identity has no bar in it. Phase 10.
+
+        ``compute_signal_id`` hashes ``bar_index`` and ``bar_time``, and **the bar
+        is the unit of identity** -- that is what makes "the same reading on the
+        same bar" recognisable as a re-delivery rather than a new trade. The mapper
+        falls back to ``bar_index=-1`` and ``bar_time=None`` when the engine's result
+        carries neither, and ``Signal.bar_index`` *defaults* to ``-1`` on the model
+        itself, so the two fallbacks agree and nothing anywhere looks wrong.
+
+        The consequence is a silent one. With no bar in the key, two readings hash
+        to the same value; the ledger therefore treats the second as a duplicate and
+        refuses it -- **a genuine new trade, suppressed by a mechanism designed to
+        suppress re-deliveries.** Different symbols and different setups still
+        separate, and either field alone is enough, so it takes both being absent.
+
+        **Refused, and here rather than downstream.** The bar is knowable at exactly
+        one place -- the adapter that read the bars and asked the engine to analyse
+        them -- and here the fallback bars are still in hand. That is what makes the
+        fix free: if the engine reported no bar, **the newest bar this adapter
+        actually supplied is the bar the reading was made on**, and it is not a
+        guess.
+
+        So this does not merely refuse. It repairs the identity from the bars the
+        analysis ran on, and refuses only when even those do not say.
+
+        A refusal here is a ``NO_TRADE`` upstream of every risk check, which is the
+        right direction: a signal whose key cannot distinguish it from another one
+        must not reach sizing, let alone the executor.
+        """
+        signal = outcome.signal
+        if signal is None or signal.bar_index >= 0 or signal.bar_time is not None:
+            return
+
+        # Recovered from the bars, not invented. `_bar_index` wants the engine's own
+        # attribute, which is what is missing, so the index comes from the series
+        # position and the time from its last element.
+        index, close_time = _newest_bar(bars)
+        if index is None and close_time is None:
+            self._log.warning(
+                Event.SIGNAL_REJECTED,
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                reason="SIGNAL_BAR_UNKNOWN",
+                explanation=(
+                    "the engine reported neither a bar index nor a bar time, and the bar "
+                    "series supplied to the engine does not carry them either, so this "
+                    "reading has no bar in its identity. Two such readings hash to the same "
+                    "key, and the ledger would refuse the second as a duplicate -- "
+                    "suppressing a real trade with a mechanism meant to suppress "
+                    "re-deliveries."
+                ),
+            )
+            return
+
+        self._log.warning(
+            Event.SIGNAL_REJECTED,
+            symbol=signal.symbol,
+            signal_id=signal.signal_id,
+            reason="SIGNAL_BAR_RECOVERED",
+            bar_index=index,
+            bar_time=close_time,
+            explanation=(
+                "the engine reported no bar, so the identity was recovered from the bar "
+                "series the analysis actually ran on. Without it two readings of this "
+                "symbol would share one key and the second would be refused as a "
+                "duplicate."
+            ),
+        )
+        if index is not None:
+            object.__setattr__(signal, "bar_index", index)
+        if close_time is not None:
+            object.__setattr__(signal, "bar_time", close_time)
 
     def latest_signal(self, symbol: str, timeframe: str) -> Signal | None:
         """The most recent signal, or ``None`` when there is nothing to trade.
@@ -281,3 +356,38 @@ def abstention_reason(signal: Signal) -> str:
     if signal.direction is Direction.FLAT:
         return "the signal names a tradable action but no direction"
     return ""
+
+
+def _newest_bar(bars: object) -> tuple[int | None, float | None]:
+    """The index and close time of the newest bar in a series.
+
+    Read from the **series position**, not from the engine's report: the engine's
+    report is exactly what is missing, and the series is what it was given. So this
+    is a recovery, not a guess -- and when both are absent the caller refuses.
+
+    The index is the position from the end rather than from the start, because the
+    engine indexes bars that way and the two must agree: the newest bar in a
+    300-bar window is ``299``, not ``0``. A recovery that disagreed with the engine's
+    own convention would put the reading on a bar the engine never saw, which is
+    worse than refusing.
+    """
+    if not isinstance(bars, (list, tuple)) or not bars:
+        return None, None
+
+    newest = bars[-1]
+    index = len(bars) - 1
+    if isinstance(newest, Mapping):
+        raw_index = newest.get("index")
+        if isinstance(raw_index, int) and not isinstance(raw_index, bool):
+            index = raw_index
+        raw_time = newest.get("time")
+    else:
+        raw_time = getattr(newest, "time", None)
+
+    close: float | None
+    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+        close = float(raw_time)
+    else:
+        close = None
+
+    return index, close
