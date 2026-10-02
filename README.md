@@ -68,10 +68,10 @@ either.
 | 9 | Idempotency and duplicate protection | 𧀅 complete |
 | 10 | End-to-end integration | 𧀅 complete |
 | 11 | MT5 / demo validation (isolated, opt-in) | ▸ partial — blocked on control ids |
-| 12 | Documentation and developer experience | ⬜ |
+| 12 | Documentation, CLI, public API | 𧀅 complete |
 | 13 | Final architecture review | ⬜ |
 
-**999 tests passing, 98% coverage.** Lint, format, type check and the
+**1027 tests passing, 97% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
@@ -111,6 +111,49 @@ Copy-Item .env.example .env
 
 Full instructions, including Linux and macOS, are in
 [docs/setup.md](docs/setup.md).
+
+---
+
+## The command line
+
+Installing the package puts `signal-to-trade-bridge` on your `PATH`:
+
+```powershell
+signal-to-trade-bridge doctor                 # can this machine run the bridge?
+signal-to-trade-bridge signal > sig.json      # a worked example signal
+signal-to-trade-bridge check sig.json         # run it through the whole pipeline
+signal-to-trade-bridge config                 # the effective configuration
+```
+
+```
+signal   stb-example-buy
+action   DRY_RUN
+reason   PIPELINE_PASSED
+
+  symbol     EURUSD LONG
+  volume     1.66
+  entry      1.10000
+  stop       1.09700  (0.00300)
+  target     1.10300
+  risk       499.9998
+```
+
+**No command can place an order.** The live path needs control identifiers
+measured against your terminal's exact build, and that measurement cannot be done
+from a script. See [docs/setup.md §8](docs/setup.md#8-the-control-identifier-refusal).
+
+The exit codes are the contract, so a shell script never has to parse the output:
+
+| Code | Meaning |
+|---|---|
+| `0` | It did what it was asked — including a dry run that sent nothing |
+| `1` | A refusal: the bridge worked and declined to trade |
+| `2` | A fault: unreachable terminal, unreadable file, refused configuration |
+| `3` | `UNKNOWN` — **must not be retried automatically** |
+
+`3` is separate from `1` because a caller that reads "refused" as "safe to retry"
+would resend a signal whose outcome it does not know, and the resend may open a
+second position.
 
 ---
 
