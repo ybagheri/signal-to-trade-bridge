@@ -207,6 +207,23 @@ def _auto_trade_bindings(supplied: AutoTradeBindings | None) -> AutoTradeBinding
         return None
 
 
+def recording_executor() -> Any:
+    """A :class:`~signal_to_trade_bridge.ports.TradeExecutor` that records instead of trading.
+
+    **Here, in the composition root, because that is the only layer allowed to know
+    both the live executor and the fake one.** The CLI needs a recorder for
+    `--what-if`, and reaching into `adapters/fake/` for it broke the layering rule
+    that ``tests/unit/test_layering.py`` enforces -- correctly. An interface layer
+    importing an adapter to get a double is how a preview turns into a second
+    production path, and the rule is worth more than the convenience.
+
+    So the wiring asks here, and the CLI just says "give me something that records".
+    """
+    from signal_to_trade_bridge.adapters.fake.executor import FakeTradeExecutor
+
+    return FakeTradeExecutor()
+
+
 def resolve_ledger(config: BridgeConfig, bindings: AutoTradeBindings | None) -> Any:
     """The idempotency ledger, or a refusal.
 

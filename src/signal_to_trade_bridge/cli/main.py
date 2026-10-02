@@ -819,6 +819,49 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     except _Refusal as exc:
         return _Outcome(EXIT_FAULT, f"ERROR: the live path could not be built: {exc}")
 
+    # `--what-if` replaces the executor, and it has to happen **here**, before the
+    # signal is processed.
+    #
+    # The first version of this flag only changed the *printing*: it built the live
+    # side -- which wires the real executor -- ran the signal, and then said "nothing
+    # was sent". The order had already gone out by then. It was found the way that
+    # kind of thing should never be found, by an `--what-if` run that came back
+    # `UNKNOWN` with the execution project's own message about an order that "may or
+    # may not have reached the terminal".
+    #
+    # Swapping the executor keeps everything that decides *what* would be sent real:
+    # the live composition root, the risk service reading the real account, the real
+    # ledger, the real validation and sizing, and the real `ExecutionRequest`. Only
+    # the last step is substituted, and the substituted one is the only step that can
+    # spend money. Building a dry-run bridge instead would have been simpler and would
+    # have produced numbers from different wiring, which is the thing this flag
+    # exists to avoid.
+    #
+    # The recorder comes from `composition`, not from `adapters/fake/`. Reaching into
+    # an adapter directory for a double is exactly what `test_layering.py` exists to
+    # prevent, and it was right to refuse: an interface layer importing an adapter to
+    # get a fake is how a preview turns into a second production path. The composition
+    # root is the only layer allowed to know both executors.
+    recorder = None
+    if getattr(args, "what_if", False):
+        from signal_to_trade_bridge.application.execution_envelope import with_executor
+        from signal_to_trade_bridge.composition import recording_executor
+
+        recorder = recording_executor()
+        # Checked rather than asserted. `build_live` always wires an envelope, but
+        # the attribute is typed optional, and a preview flag that raised a TypeError
+        # on a build that had not wired one would be a poor way to learn it -- a
+        # preview is exactly where a confusing failure is most likely to be mistaken
+        # for "the live path is broken".
+        existing = bridge.pipeline._envelope
+        if existing is None:
+            return _Outcome(
+                EXIT_FAULT,
+                "ERROR: the live pipeline has no execution envelope, so there is nothing "
+                "to preview. That is a bug in build_live, not a refusal.",
+            )
+        bridge.pipeline.wire_execution(with_executor(existing, recorder))
+
     # The decision, from the live pipeline. This is the same wiring an order would
     # go through, which is the point of building the live side even for `--what-if`:
     # a report of a *different* pipeline would be a report of a different thing.
@@ -844,9 +887,24 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     if getattr(args, "what_if", False):
         lines += [
             "  --what-if was given, so nothing was sent. The numbers above are what",
-            "  this signal would have sent, computed by the same wiring an order uses.",
-            "  Drop --what-if and keep --confirm-demo to place it.",
+            "  this signal would have sent, computed by the same wiring an order uses:",
+            "  the live composition root, the real account, the real ledger, the real",
+            "  sizing. Only the final click was replaced by a recorder.",
         ]
+        if recorder is not None and recorder.submitted:
+            request = recorder.submitted[0]
+            # `stop_loss` and `take_profit` are plain `Decimal` on the request, not
+            # price objects. Reading `.price` off them would have been the obvious
+            # guess -- the *intent* carries `StopLoss` and `TakeProfit` objects, and
+            # the request is built from them. mypy caught it before it ran.
+            lines += [
+                "",
+                "  the request that would have gone to the terminal:",
+                f"    {request.symbol} {request.direction.value} {request.volume} lots",
+                f"    entry {request.entry}  stop {request.stop_loss}",
+                f"    target {request.take_profit if request.take_profit is not None else 'none'}",
+                f"    comment {request.comment!r}",
+            ]
         return _Outcome(
             _decision_code(decision), "\n".join(lines), {"decision": decision.to_dict()}
         )
