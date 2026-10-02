@@ -155,6 +155,10 @@ signal-to-trade-bridge
 It reports on the terminal without touching it. It never launches MetaTrader, never
 reads the account, and never moves a mouse.
 
+**If it cannot run, it says so first, before the detail.** That block is the answer;
+the `ok` and `REFUSED` marks underneath are there so you can see which part of the
+machine is the problem:
+
 ### The exit codes are the contract
 
 This is the part worth reading, because it is what lets a shell script drive the
@@ -245,12 +249,36 @@ signal-to-trade-bridge doctor
 ```
 
 ```
+signal-to-trade-bridge
+  version            0.1.0
+
+  cannot run here
+    - the measured control identifiers do not belong to this terminal's build. The
+      live path is refused, and no configuration clears it -- run
+      python scripts/control_ids.py for the details.
+
+  MetaTrader5        ok
+  auto_trade         ok
   terminal           C:\Program Files\Alpari MT5_4\terminal64.exe
+  data directory     C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352D...
   control ids        REFUSED
     build            6230 (ids measured on 6184)
+    The measured control identifiers belong to build 6184 and this terminal is
+    build 6230 -- a gap of 46 builds. Upstream's rule is explicit: never
+    substitute a control identifier you have not measured, and if a build presents
+    something different, refuse and report it.
 ```
 
-That `REFUSED` is the correct answer, and §9 explains why it cannot be configured
+The `cannot run here` block is the answer, and it comes first on purpose — the
+`ok` / `REFUSED` marks below it are corroboration rather than the only signal. If a
+path you configured is wrong, it is named there:
+
+```
+  cannot run here
+    - no terminal at C:\Program Files\Alpari MT5_4\termnal64.exe
+```
+
+That `REFUSED` is the correct answer, and §8 explains why it cannot be configured
 away.
 
 ### Configuration

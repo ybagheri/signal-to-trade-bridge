@@ -24,15 +24,15 @@ policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
 project that calls the others. Phase 7 built the **MT5 data adapter** and the
 **execution adapter** — the last things between the pipeline and a real order.
 
-**1027 tests passing, 97% coverage.** Lint, format, type check and the
+**1189 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite still runs **without `albrooks`**
 **or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
-Last completed phase: 12
-Current phase:       12 — CLI, public API and docs complete
-Next phase:          13 (final architecture review), and re-measure control ids
-                     on build 6230 to unblock live assembly
+Last completed phase: 13
+Current phase:       13 — architecture review done; the layer graph is now tested
+Next phase:          re-measure control ids on build 6230, which is the only
+                     thing left, and it needs a human at the keyboard
 ```
 
 ---
@@ -51,8 +51,8 @@ Next phase:          13 (final architecture review), and re-measure control ids
 - [x] **Phase 9** — Idempotency, and the envelope that made it safe
 - [x] **Phase 10** — End-to-end integration, and the composition root
 - [~] Phase 11 — live side built and validated read-only; **blocked on ids**
-- [ ] Phase 12 — Documentation
-- [ ] Phase 13 — Final architecture review
+- [x] Phase 12 — CLI, public API, setup documentation
+- [x] Phase 13 — Final architecture review
 
 ---
 
@@ -1757,7 +1757,7 @@ decide to trade and cannot yet trade.*
 
 ## Tests
 
-**1043 collected, 1027 passed, 16 skipped in about 8 seconds** (no opt-in) The suite runs
+**1206 collected, 1189 passed, 17 skipped in about 6 seconds** (no opt-in) The suite runs
 **without `albrooks` or `MetaTrader5` installed** and without a terminal — the
 MT5 adapter takes its bindings by injection, which is what makes that possible.
 
@@ -1788,7 +1788,9 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
 | `unit/test_cli.py` | 38 | The exit-code contract, the four commands, the report a human reads, and the public API from outside. |
-| **Total** | **1027 passed, 16 skipped** without the opt-in; **1040 passed, 3 skipped** with it |
+| `unit/test_layering.py` | 137 | Every import edge in the project, against a table of what each layer may import. |
+| `unit/test_cli_refusals.py` | 27 | `check`'s success path, the malformed-signal refusals, and `doctor`'s reporting branches. |
+| **Total** | **1189 passed, 17 skipped** without the opt-in; **1202 passed, 4 skipped** with it |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1815,15 +1817,21 @@ The full gate, all clean:
 
 ```
 ruff check .            All checks passed!
-ruff format --check .   72 files already formatted
-mypy                    Success: no issues found in 37 source files
-pytest                  1027 passed, 16 skipped
+ruff format --check .   94 files already formatted
+mypy                    Success: no issues found in 47 source files
+pytest                  1189 passed, 17 skipped
 ```
 
 With `BRIDGE_ALLOW_MT5_TESTS=1` against a running terminal the suite reports
-**1040 passed, 3 skipped** — 13 of the 16 skips disappear. They are the read-only
+**1202 passed, 4 skipped** — 13 of the 17 skips disappear. They are the read-only
 MT5 tests, never collected by default, so a contributor without a terminal sees a
 suite that passes rather than a suite that errors.
+
+**Run it in both environments.** Two defects in Phases 12 and 13 were invisible in a
+clean shell and visible in a configured one — a test asserting a *default* while
+`os.environ` still held the developer's real values, and a `doctor` branch that
+never executed because nothing set a terminal path. A green run in a clean shell is
+necessary and not sufficient.
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
 > integration tests against the real `Analyzer` collect only when `albrooks` is
@@ -2037,6 +2045,137 @@ was hitting the right behaviour in the wrong place.
 
 ---
 
+---
+
+## Phase 13 — Final architecture review
+
+**Method.** Built the import graph, read the diagram against it, measured every
+module's coverage, and looked for code nothing reaches. Three things came out of
+it: one design bug, one documentation lie, and one layer rule that had never been
+checked.
+
+### The finding that mattered: a diagnostic that diagnosed nothing
+
+`doctor` built a careful `problems` list, with a reason attached to each entry, and
+then **never printed it**. `_render_doctor` drew the status block only. So a
+machine with a typo in `BRIDGE_MT5_TERMINAL_PATH` exited 2 and said nothing about
+the missing file — the operator got a complaint about control identifiers and a
+`REFUSED` mark, neither of which is why the bridge cannot start.
+
+This is the Phase 12 story again, one layer up. `doctor` is the command
+`docs/setup.md` tells a reader to run first, so the first thing it did with a broken
+configuration was conceal it. Fixed: the problems block is now rendered, and it is
+rendered **first**, because the `ok` / `REFUSED` marks are corroboration for a
+conclusion the operator has already been given.
+
+The same review found that `doctor` reported the configured terminal path and
+silently ignored the configured **data** path. That is the path a reader has to go
+and find by hand — the hash-named folder under `MetaQuotes\Terminal`, which
+`docs/setup.md` explicitly walks them through locating — so the one value most
+likely to be wrong was the one not shown. It is now reported and checked, and the
+absence is phrased as what it is: a lost confirmation, not a fault, since a build
+can still be read from the executable.
+
+Both branches had **zero** test coverage, which is why neither was noticed.
+
+### The documentation was describing a different project
+
+`docs/architecture.md` §5.1 drew five layers and said "dependency direction is
+strictly inward". The code has eight layers plus two root modules. `cli/` was
+called `interfaces/`. `configuration/`, `infrastructure/logging/`, `composition.py`
+and `live.py` were absent entirely. And the strictness claim was not true:
+`application` and `adapters` both import `infrastructure.logging`.
+
+None of that is a criticism of the Phase 0 audit — it could not know what thirteen
+phases would need. But a diagram that has drifted is worse than no diagram, because
+it is what a new reader trusts. Rewritten to the architecture as built, with the
+two edges that are deliberately not inward named in a table rather than left for
+somebody to rediscover.
+
+### The rule that was written down and never checked
+
+Only one direction was enforced: `test_domain_isolation.py`, which is the important
+one, since a domain import of a private upstream would break the suite on any
+machine that could not clone them. Every other edge was documented and unenforced.
+
+`tests/unit/test_layering.py` now walks the whole graph and fails on any edge not
+in a permission table, with the failure message naming what was allowed. It also
+fails when a **new top-level package appears on disk without being added to the
+table** — otherwise a new layer's imports would be unchecked, which is the same as
+having no rule.
+
+**The most consequential direction it now guards is the one nobody would have
+written a test for:** only `cli/` and the package root may import `composition` or
+`live`. If `application.process_signal` imported `composition`, the pipeline would
+be assembling its own collaborators — the dependency inversion this architecture
+exists to prevent — and every other test in the project would still pass, because
+the offending edge points outward and the domain rule does not care.
+
+Two things about writing that test are worth recording:
+
+- **It reported "no violations" the first time it ran, on an empty graph.** The
+  module keys were built without the package prefix while the imports carried it, so
+  nothing resolved. A test that cannot fail is indistinguishable from one that
+  passes, and an architecture test that cannot fail is worse than none, because it
+  is trusted. There is now a test whose only job is to assert the graph was built
+  (>50 edges, ≥5 layers reached), and a parametrised case per edge so a failure
+  names the file and line.
+- **It flagged correct code twice.** `live → composition` (both are root modules)
+  and `adapters/albrooks/source.py → infrastructure.logging` (the named exception).
+  A test that fails on correct code gets disabled, so both were fixed in the test
+  rather than worked around, and the exception is now visible in the permission
+  table itself instead of hidden in a branch.
+
+### The logging exception, kept and bounded
+
+`application` importing `Event`, `StructuredLogger` and `get_logger` from a concrete
+implementation is a real dependency-inversion violation, and `ports/` has no logging
+Protocol to legitimise it.
+
+It is being kept, and the reasoning is recorded so nobody "fixes" it by reflex:
+logging is a vocabulary, not a capability. `Event` is the same category as
+`RejectionReason`, which the domain is entitled to define. A Protocol with one
+implementation and no plausible second is ceremony rather than inversion.
+
+What is **not** acceptable is the same import reaching `configure_logging`, which
+mutates global handler state. That is forbidden by name and checked, because
+application code that reconfigures logging is exactly how this exception becomes a
+doorway.
+
+### Also found
+
+- **`live.py` imported `composition._ledger`,** a private name across a module
+  boundary. Renamed to `resolve_ledger` and made public, because it is a policy
+  decision — the single place that decides whether an idempotency store is available
+  — and the live side has to make exactly that decision. Depending on a private name
+  is the kind of coupling that looks harmless until the function is renamed and the
+  live assembly breaks with no test pointing at the seam.
+
+- **No dead code.** Every module-level name in the package is referenced by
+  something. `cli/main.py` was the only file meaningfully below par at 85%, and the
+  gap was entirely the paths that refuse bad input — which is the part of a
+  trading CLI most worth testing. Now 95%, with `check`'s success path, the
+  malformed-signal refusals, and `doctor`'s reporting branches all covered.
+
+- **One more refusal, found by writing a fixture.** A signal carrying a stop price
+  with no `stop_basis` is refused with `NO_VALID_STOP`. That is correct behaviour
+  and it is now pinned by a test, because "fill in the missing provenance" is the
+  obvious tempting shortcut and it is the line that would let this project invent
+  where a stop came from.
+
+### Where it stands
+
+**1189 passing, 98% coverage.** Lint, format, type check, domain isolation and the
+full layer graph all clean, in a clean shell and in one with the real terminal paths
+exported.
+
+**What a review cannot do.** None of this closes Phase 11. The control identifiers
+are still measured on build 6184 against a terminal on 6230, and that still needs a
+human at the keyboard. This phase made the refusal well-reported; it did not and
+could not make the identifiers valid.
+
+---
+
 ## Known Issues
 
 Issues found **in the upstream repositories** during the audit. They are recorded
@@ -2172,9 +2311,13 @@ live, the dry run reports in full, the envelope carries its three collaborators,
 ledger is durable and refuses when unreadable, and the default configuration still
 cannot trade.
 
-Phase 12 is documentation and developer experience; Phase 13 is the final
-architecture review. Neither needs a terminal, and Phase 12 is the natural next step
-while the identifiers wait.
+Phases 12 and 13 are done: the CLI, the public API, the setup guide, and the
+architecture review. **Every phase that does not need a terminal is now finished.**
+The re-measurement above is the only outstanding work in the project, it is blocked
+on a human, and it cannot be done from a script by design.
+
+---
+
 ## Open Questions
 
 ### Resolved
