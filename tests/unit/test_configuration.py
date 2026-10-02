@@ -43,6 +43,20 @@ class TestDefaults:
         # project defaults to another person's C:\Users\BazikadeStore. A default
         # that names any of those is a default that is wrong on every other
         # laptop.
+        #
+        # The two variables are cleared **here**, and not left to `clean_environment`,
+        # because that fixture snapshots and restores but never clears -- a deliberate
+        # choice so it cannot delete a developer's real settings mid-session. The
+        # consequence is that a test asserting something about the *defaults* runs
+        # against the ambient environment. This one passed on a machine with nothing
+        # exported and failed on the machine that actually configures a terminal,
+        # which is the worst possible pairing: the test for "no path is hard-coded"
+        # broke on the one machine where a path legitimately is.
+        import os
+
+        for name in ("MT5_TERMINAL_PATH", "MT5_DATA_PATH"):
+            os.environ.pop(f"{BRIDGE_ENV_PREFIX}{name}", None)
+
         config = config_from_env(apply=False)
         assert config.mt5_terminal_path is None
         assert config.mt5_data_path is None

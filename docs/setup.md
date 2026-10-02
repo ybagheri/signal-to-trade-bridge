@@ -110,7 +110,179 @@ in it**. The bridge does not need a broker password — see
 
 ---
 
-## 5. Run the tests
+## 5. Use it from the command line
+
+Installing the package puts one command on your `PATH`:
+
+```powershell
+signal-to-trade-bridge --version
+```
+
+The name comes from `[project.scripts]` in `pyproject.toml` and is the full one.
+`python -m signal_to_trade_bridge` also works and needs no install, which is the
+form to use when you are debugging the entry point itself.
+
+### The four commands
+
+| Command | What it does |
+|---|---|
+| `doctor` | Whether *this machine* can run the bridge, and which part is missing |
+| `signal` | Prints a worked example signal, in the shape `auto-trade` reads |
+| `check FILE` | Runs one signal file through the whole pipeline and prints the decision |
+| `config` | Prints the effective configuration as JSON |
+
+**No command here can place an order.** That is not a missing feature — the live
+path needs control identifiers measured against your terminal's exact build, and
+that is the subject of §9. `check` will happily size a trade; it will not send one.
+
+Start with `doctor`, because it is the only command that is safe to run against a
+machine you have not set up yet:
+
+```powershell
+signal-to-trade-bridge doctor
+```
+
+```
+signal-to-trade-bridge
+  version            0.1.0
+
+  MetaTrader5        ok
+  auto_trade         ok
+  terminal           not configured
+  control ids        not checked
+```
+
+It reports on the terminal without touching it. It never launches MetaTrader, never
+reads the account, and never moves a mouse.
+
+### The exit codes are the contract
+
+This is the part worth reading, because it is what lets a shell script drive the
+bridge without parsing prose:
+
+| Code | Meaning |
+|---|---|
+| `0` | It did what it was asked. Includes a `DRY_RUN` — a sized trade that was not sent. |
+| `1` | A refusal. The bridge worked and declined to trade. |
+| `2` | A fault. Unreachable terminal, unreadable file, refused configuration. |
+| `3` | `UNKNOWN` — and **must not be retried automatically**. |
+
+`3` is separate from `1` on purpose. The bridge could not determine whether a
+position exists. A caller that reads "refused" as "safe to try again" would resend
+it, and the resend may open a second position. So a caller keying retry logic on
+"did it work?" must treat `3` as terminal and page someone.
+
+### A complete dry run
+
+```powershell
+signal-to-trade-bridge signal > sig.json
+signal-to-trade-bridge check sig.json
+```
+
+```
+signal   stb-example-buy
+action   DRY_RUN
+reason   PIPELINE_PASSED
+because  every check passed and the trade is fully sized, and nothing was sent...
+
+  symbol     EURUSD LONG
+  volume     1.66
+  entry      1.10000
+  stop       1.09700  (0.00300)
+  target     1.10300
+  risk       499.9998
+  planned    498.000
+  ratio      1
+
+  downstream gates
+    evaluated  False
+    accepted   False
+    because    no downstream risk engine is wired into this dry run
+    blockers   execution is not enabled (BRIDGE_EXECUTION_ENABLED); dry-run mode is on...
+```
+
+Two things in that output are worth pausing on.
+
+**`downstream gates: evaluated False`** is not a clean run. The gates that decide
+whether a sized trade may be sent have not run, because nothing is wired to them
+yet. "No blockers" and "the blockers were never evaluated" are opposites, and the
+report says which one you have.
+
+**The `volume` is not a template number.** It was computed from your account
+balance and the symbol's contract. That is why `signal` prints no volume and no
+price: those are the bridge's to derive, and a plausible-looking `0.10` in a
+template would be a number nobody computed.
+
+> **Redirecting on Windows.** `signal > sig.json` from PowerShell writes UTF-16, not
+> UTF-8, and a strict reader rejects it with `'utf-8' codec can't decode byte 0xff
+> in position 0`. `check` reads UTF-8, UTF-8-with-BOM, UTF-16 and cp1252, so the
+> documented command works as written on PowerShell. If you pipe the output into
+> anything else, write it explicitly:
+>
+> ```powershell
+> signal-to-trade-bridge signal | Out-File -Encoding utf8 sig.json
+> ```
+
+### Pointing it at your terminal
+
+`doctor` reporting `terminal not configured` is the normal state on a fresh
+install. Set the two paths in `.env`:
+
+```dotenv
+BRIDGE_MT5_TERMINAL_PATH=C:\Program Files\Alpari MT5_4\terminal64.exe
+BRIDGE_MT5_DATA_PATH=C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352DBDC25D08FEC12BD2
+```
+
+`BRIDGE_MT5_DATA_PATH` is the terminal's data directory, not its install directory.
+It is the long hex-named folder under `MetaQuotes\Terminal`, and it is not
+guessable — a terminal has one per installation, and the name is a hash. The
+bridge reads it rather than starting the terminal, so it has to be told.
+
+Then:
+
+```powershell
+signal-to-trade-bridge doctor
+```
+
+```
+  terminal           C:\Program Files\Alpari MT5_4\terminal64.exe
+  control ids        REFUSED
+    build            6230 (ids measured on 6184)
+```
+
+That `REFUSED` is the correct answer, and §9 explains why it cannot be configured
+away.
+
+### Configuration
+
+```powershell
+signal-to-trade-bridge config
+```
+
+Two lines in that output are the safety properties, and they are what the defaults
+are for:
+
+```json
+"dry_run": true,
+"execution_enabled": false
+```
+
+Nothing here is redacted, because nothing in `BridgeConfig` is a secret. A
+redaction heuristic would have to guess which values look like credentials, and it
+would either over-redact a risk percentage or under-redact a token — the second of
+which is the failure that matters. If a secret is ever added to the configuration,
+it is redacted **by field name**, at the point it is added.
+
+A `--log-dir` flag overrides `BRIDGE_LOG_DIR` for one invocation, which is the
+form to use when you want the ledger somewhere you can read it:
+
+```powershell
+signal-to-trade-bridge check sig.json --log-dir .\scratch-ledger
+```
+
+---
+
+## 6. Run the tests
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -141,7 +313,7 @@ portable, so it is run as its own step rather than being trusted to one test fil
 
 ---
 
-## 6. What works without MetaTrader 5
+## 7. What works without MetaTrader 5
 
 | Component | Needs MT5? |
 |---|---|
@@ -160,7 +332,47 @@ suite. Only the live adapter and Phase 11 need the terminal.
 
 ---
 
-## 7. Troubleshooting
+## 8. The control-identifier refusal
+
+This is the one thing in the setup that no configuration fixes, so it gets its own
+section rather than a line in the troubleshooting list.
+
+To place an order, \uto-trade\ drives the MetaTrader order dialog by clicking
+buttons. That means it needs the *screen coordinates* of those buttons. Screen
+coordinates are not a property of the software; they are a property of one
+installation, one display, one resolution, one window position and one build.
+
+So the identifiers are **measured**, not derived. \scripts/control_ids.py\ measures
+them by taking a screenshot of the real dialog and asking a human to confirm each
+point. It then records the terminal build it measured against.
+
+If the build changes, every measurement is void:
+
+\\powershell
+python scripts/control_ids.py
+\
+\REFUSED
+  build    6230 (ids measured on 6184)
+  The measured control identifiers belong to build 6184 and this terminal is
+  build 6230 -- a gap of 46 builds. Upstream's rule is explicit: never substitute
+  a control identifier you have not measured, and if a build presents something
+  different, refuse and report it.
+\
+That refusal is the system working. A build that silently accepted a stale
+identifier would be a system that clicks a position-size field and does not know
+it.
+
+**To clear it**, a human re-measures on the current build, at the current display
+resolution, with the dialog open at the position it will be used from. It cannot be
+done from a script, and that is the point — the alternative is guessing where a
+button is before spending someone's money.
+
+Until then \uild_live()\ refuses, \check\ still runs the full pipeline in dry
+run, and nothing can be sent.
+
+---
+
+## 9. Troubleshooting
 
 **`scripts/setup.ps1` says an upstream project was not found.**
 Set `ALBROOKS_PATH` and `AUTO_TRADE_PATH` to wherever you cloned them. The

@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import StubBindings
 from signal_to_trade_bridge.adapters.auto_trade import load_bindings
 from signal_to_trade_bridge.composition import (
     Bridge,
@@ -49,60 +50,9 @@ NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 SIGNAL_ID = "stb-composition-0001"
 
 
-# --- doubles for the terminal, because no terminal is open ------------------
-
-
-class _StubAccountInfo:
-    def __init__(self) -> None:
-        self.balance = 10000.0
-        self.equity = 10000.0
-        self.currency = "USD"
-        self.login = 53184454
-        self.name = "Alpari-MT5-Demo"
-
-
-class _StubSymbolInfo:
-    """Shaped like the bindings' symbol named tuple -- **MT5's own field names**.
-
-    Not the bridge's ``SymbolSpec``: the adapter maps ``trade_contract_size`` and the
-    rest one for one, so a stub carrying ``contract_size`` would be testing a
-    conversion that does not happen. This is the seam the composition depends on,
-    and it is exactly the seam a wiring mistake would hide behind.
-    """
-
-    def __init__(self, symbol: str = "EURUSD") -> None:
-        self.name = symbol
-        self.trade_contract_size = 100000.0
-        self.trade_tick_size = 0.00001
-        self.trade_tick_value_profit = 1.0
-        self.trade_tick_value_loss = 1.0
-        self.volume_min = 0.01
-        self.volume_max = 100.0
-        self.volume_step = 0.01
-        self.digits = 5
-        self.point = 0.00001
-        self.currency_base = "EUR"
-        self.currency_profit = "USD"
-        self.currency_margin = "EUR"
-
-
-class _StubBindings:
-    """The MT5 bindings surface, with a EURUSD specification attached."""
-
-    def __init__(self, symbols: set[str] | None = None) -> None:
-        self._symbols = {"EURUSD"} if symbols is None else symbols
-
-    def account_info(self) -> _StubAccountInfo:
-        return _StubAccountInfo()
-
-    def symbol_info(self, name: str) -> object:
-        key = (name or "").strip().upper()
-        if key not in self._symbols:
-            return None
-        return _StubSymbolInfo(key)
-
-    def shutdown(self) -> None:
-        return None
+# The terminal doubles live in conftest.py now: this module, the CLI tests and any
+# future one all need the same EURUSD-shaped surface, and a copy per module is a
+# place for a wrong field name to hide.
 
 
 def _signal(**overrides: object) -> Signal:
@@ -147,7 +97,7 @@ def _bindings_or_skip() -> object:
 def _bridge(tmp_path: Path, **overrides: object) -> Bridge:
     return build_bridge(
         _config(tmp_path, **overrides),
-        mt5_bindings=_StubBindings(),  # type: ignore[arg-type]
+        mt5_bindings=StubBindings(),  # type: ignore[arg-type]
         auto_trade_bindings=_bindings_or_skip(),  # type: ignore[arg-type]
     )
 
@@ -262,7 +212,7 @@ class TestTheWiring:
         # live where the disagreement is real.
         bridge = build_bridge(
             _config(tmp_path, risk=RiskParameters(allowed_symbols={"GBPJPY"})),
-            mt5_bindings=_StubBindings({"GBPJPY"}),  # type: ignore[arg-type]
+            mt5_bindings=StubBindings({"GBPJPY"}),  # type: ignore[arg-type]
             auto_trade_bindings=_bindings_or_skip(),  # type: ignore[arg-type]
         )
         decision = bridge.pipeline.process(_signal(symbol="GBPJPY"))
@@ -305,7 +255,7 @@ class TestTheRefusalsCompose:
             "signal_to_trade_bridge.composition._auto_trade_bindings", lambda _s: None
         )
         with pytest.raises(CompositionRefusal) as raised:
-            build_bridge(_config(tmp_path), mt5_bindings=_StubBindings())  # type: ignore[arg-type]
+            build_bridge(_config(tmp_path), mt5_bindings=StubBindings())  # type: ignore[arg-type]
         assert "idempotency" in str(raised.value)
 
     def test_a_bindings_object_missing_everything_is_refused_as_a_decision(
@@ -358,7 +308,7 @@ class TestThePositionReaderIsOptional:
         # total outage on a machine that has no indicator attached and never will.
         bridge = build_bridge(
             _config(tmp_path, mt5_data_path=None),
-            mt5_bindings=_StubBindings(),  # type: ignore[arg-type]
+            mt5_bindings=StubBindings(),  # type: ignore[arg-type]
             auto_trade_bindings=_bindings_or_skip(),  # type: ignore[arg-type]
         )
         assert bridge.can_execute is False
@@ -404,7 +354,7 @@ class TestThePositionReaderIsOptional:
                 mt5_data_path=None,
                 risk=RiskParameters(allowed_symbols={"EURUSD"}, max_open_positions=0),
             ),
-            mt5_bindings=_StubBindings(),  # type: ignore[arg-type]
+            mt5_bindings=StubBindings(),  # type: ignore[arg-type]
             auto_trade_bindings=_bindings_or_skip(),  # type: ignore[arg-type]
         )
         decision = bridge.pipeline.process(_signal())
@@ -423,7 +373,7 @@ class TestThePositionReaderIsOptional:
                 mt5_data_path=None,
                 risk=RiskParameters(allowed_symbols={"EURUSD"}, max_open_positions=1),
             ),
-            mt5_bindings=_StubBindings(),  # type: ignore[arg-type]
+            mt5_bindings=StubBindings(),  # type: ignore[arg-type]
             auto_trade_bindings=_bindings_or_skip(),  # type: ignore[arg-type]
         )
         decision = bridge.pipeline.process(_signal())
@@ -562,7 +512,7 @@ class TestTheAbsentOptionalPaths:
         # silently does nothing and passes.
         from signal_to_trade_bridge import composition as module
 
-        stub = _StubBindings()
+        stub = StubBindings()
         assert module._mt5_bindings(_config(tmp_path), stub) is stub  # type: ignore[arg-type]
         # And with nothing supplied the real loader runs. Whether that succeeds
         # depends on the machine, so it is not asserted -- what matters is that the
@@ -627,7 +577,7 @@ class TestTheAbsentOptionalPaths:
         # The ledger needs the bindings, so this asserts the *ordering*: a missing
         # package stops the assembly before the report is ever built.
         with pytest.raises(CompositionRefusal):
-            build_bridge(_config(tmp_path), mt5_bindings=_StubBindings())  # type: ignore[arg-type]
+            build_bridge(_config(tmp_path), mt5_bindings=StubBindings())  # type: ignore[arg-type]
 
     def test_a_reachable_package_is_used_for_the_preflight(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

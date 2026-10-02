@@ -216,3 +216,94 @@ def long_take_profit() -> TakeProfit:
         source=TakeProfitSource.RR_FALLBACK,
         basis="",
     )
+
+
+# --- a double for the terminal, because no test may need a real one ---------
+
+
+class _StubAccountInfo:
+    """MT5's ``account_info()`` shape, as plain attributes.
+
+    A double rather than a fixture of the bridge's own ``AccountBalance``, because
+    the adapter is the thing under test at this seam: a stub already in domain shape
+    would pass while the mapping from MT5's field names went untested.
+    """
+
+    def __init__(self) -> None:
+        self.balance = 10000.0
+        self.equity = 10000.0
+        self.currency = "USD"
+        self.login = 53184454
+        self.name = "Alpari-MT5-Demo"
+
+
+class _StubSymbolInfo:
+    """MT5's own field names, not the bridge's ``SymbolSpec`` field names.
+
+    The adapter maps ``trade_contract_size`` to ``contract_size`` one for one, so a
+    stub carrying the domain names would test a conversion that does not happen --
+    and would hide a wiring mistake behind a stub that already agreed with us.
+    """
+
+    def __init__(self, symbol: str = "EURUSD") -> None:
+        self.name = symbol
+        self.trade_contract_size = 100000.0
+        self.trade_tick_size = 0.00001
+        self.trade_tick_value_profit = 1.0
+        self.trade_tick_value_loss = 1.0
+        self.volume_min = 0.01
+        self.volume_max = 100.0
+        self.volume_step = 0.01
+        self.digits = 5
+        self.point = 0.00001
+        self.currency_base = "EUR"
+        self.currency_profit = "USD"
+        self.currency_margin = "EUR"
+
+
+class StubBindings:
+    """The MT5 bindings surface, with a EURUSD specification attached.
+
+    Lives here rather than in one test module because three of them now need it, and
+    a copy per module is three places for a wrong field name to hide. It is a class
+    rather than a fixture because tests construct it with different symbol sets.
+    """
+
+    def __init__(self, symbols: set[str] | None = None) -> None:
+        self._symbols = {"EURUSD"} if symbols is None else symbols
+
+    def account_info(self) -> _StubAccountInfo:
+        return _StubAccountInfo()
+
+    def symbol_info(self, name: str) -> object:
+        key = (name or "").strip().upper()
+        if key not in self._symbols:
+            return None
+        return _StubSymbolInfo(key)
+
+    def shutdown(self) -> None:
+        return None
+
+
+@pytest.fixture
+def bridge_factory(tmp_path: Path):
+    """Build a real ``Bridge`` wired to a stub terminal.
+
+    The real composition root, not a hand-assembled pipeline: a test of the CLI's
+    reporting wants the decision a *real* bridge produces, and a hand-built one would
+    be exactly the stub that hides the defect the test exists to find.
+
+    ``build_bridge`` without ``mt5_bindings`` refuses on a machine with no terminal,
+    which is the correct production behaviour and makes it useless as a default for
+    tests. Hence this factory, which supplies the one thing a test must not depend
+    on -- an open terminal -- and nothing else.
+    """
+    from signal_to_trade_bridge.composition import BridgeConfig, build_bridge
+
+    def _factory(**overrides: object):
+        from dataclasses import replace
+
+        config = replace(BridgeConfig(), log_directory=tmp_path / "logs", **overrides)
+        return build_bridge(config, mt5_bindings=StubBindings())  # type: ignore[arg-type]
+
+    return _factory

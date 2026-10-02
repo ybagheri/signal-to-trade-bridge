@@ -65,6 +65,13 @@ windows = [
 albrooks = ["albrooks @ file:///PATH/TO/al-brooks-price-action-engine"]
 auto-trade = ["auto-trade @ file:///PATH/TO/auto-trade"]
 
+# Phase 12 made this entry point real. It was declared from the project foundation,
+# pointing at a module that did not exist until now -- so `signal-to-trade-bridge`
+# was a command that failed on invocation for eleven phases, which is worse than not
+# having declared it: the name was taken, so nobody thought to add one.
+#
+# **No command can place an order.** The live path needs control identifiers measured
+# for this terminal's build, and until it has them the composition root refuses.
 [project.scripts]
 signal-to-trade-bridge = "signal_to_trade_bridge.cli.main:main"
 
@@ -78,7 +85,10 @@ signal_to_trade_bridge = ["py.typed"]
 # This key lives inside [tool.pytest.ini_options], which is the correct place
 # for it. albrooks' pyproject.toml has it at the top level, where setuptools
 # parses it as an extra requirement group instead; see docs/integration.md.
-pythonpath = ["src"]
+# "tests" as well as "src", so a test module can import the shared terminal double
+# from tests/conftest.py by name. Three modules need it now; a copy per module is
+# three places for a wrong MT5 field name to hide.
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
