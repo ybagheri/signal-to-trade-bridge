@@ -67,11 +67,11 @@ either.
 | 8 | Dry run / simulation mode | 𧀅 complete |
 | 9 | Idempotency and duplicate protection | 𧀅 complete |
 | 10 | End-to-end integration | 𧀅 complete |
-| 11 | MT5 / demo validation (isolated, opt-in) | ▸ next |
+| 11 | MT5 / demo validation (isolated, opt-in) | ▸ partial — blocked on control ids |
 | 12 | Documentation and developer experience | ⬜ |
 | 13 | Final architecture review | ⬜ |
 
-**967 tests passing, 98% coverage.** Lint, format, type check and the
+**999 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.

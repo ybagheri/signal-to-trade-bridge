@@ -24,14 +24,14 @@ policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
 project that calls the others. Phase 7 built the **MT5 data adapter** and the
 **execution adapter** — the last things between the pipeline and a real order.
 
-**967 tests passing, 98% coverage.** Lint, format, type check and the
+**999 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite still runs **without `albrooks`**
 **or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
-Last completed phase: 10
-Current phase:       11 — MT5 / demo validation, opt-in
-Next phase:          11 — the live side: the terminal adapter, behind an opt-in
+Last completed phase: 11
+Current phase:       11 — live side BUILT; blocked on control-id re-measurement
+Next phase:          re-measure control ids on build 6230, then Phase 12
 ```
 
 ---
@@ -49,7 +49,7 @@ Next phase:          11 — the live side: the terminal adapter, behind an opt-i
 - [x] Phase 8 — Dry run reporting
 - [x] **Phase 9** — Idempotency, and the envelope that made it safe
 - [x] **Phase 10** — End-to-end integration, and the composition root
-- [ ] Phase 11 — MT5 / demo validation
+- [~] Phase 11 — live side built and validated read-only; **blocked on ids**
 - [ ] Phase 12 — Documentation
 - [ ] Phase 13 — Final architecture review
 
@@ -658,6 +658,98 @@ is refused at the concurrency gate. And with a *dead terminal* the refusal moves
 earlier, to the account gate, as soon as the limit is configured. Three cases, three
 different refusals, and the safe configuration -- leave the limit unset -- is stated
 in `docs/risk-management.md` rather than discovered.
+
+### What Phase 11 Found — and what it could not close
+
+```
+live.py               BuildMismatch, ControlIdCheck, check_control_ids(), build_live()
+scripts/control_ids.py  the same check as a runnable report
+tests/live/
+  test_mt5_live.py    21 tests, opt-in; 13 read the terminal, 8 need none
+tests/unit/
+  test_live_assembly.py  12 tests, the assembly with a matching build
+```
+
+**Phase 11's headline is a refusal, and the refusal is correct.**
+
+### Known Issue 5 is now closed as a *risk* and open as a *task*
+
+The build was read from two independent sources and they agree:
+
+| Source | Build |
+|---|---|
+| `terminal64.exe` FileVersion | **6230** |
+| the running terminal's own `terminal_build` | **6230** |
+
+`auto-trade`'s control identifiers were measured on **6184**. The gap is **46
+builds**, and upstream's own rule is explicit:
+
+> Never substitute a control identifier you have not measured. A control found once
+> is a control whose behaviour is not established. If a build presents something
+> different, refuse and report it — do not wire it up.
+
+So `check_control_ids` refuses, `build_live` refuses before it builds anything, and
+`python scripts/control_ids.py` prints the whole thing as a report. **The live path
+cannot be assembled on this machine**, and that is now enforced by code rather than
+by a note in a document. Only re-measuring every identifier on build 6230, at this
+display resolution, clears it.
+
+### Three findings that only a live terminal could have produced
+
+**1. `account_info().name` is the account holder's display name, not the server.**
+
+```
+terminal title bar   53184454 - Alpari-MT5-Demo: Demo Account - Hedge - Alpari - [USDInd,H1]
+account_info().login  53184454
+account_info().name   "YouJos Hundred"        <- the account holder's name
+```
+
+The bridge maps that field to `AccountBalance.server`, so a log line reading
+`server=YouJos Hundred` is **the adapter reporting faithfully**. The field name is
+the terminal's, not this project's, and renaming it would be the bug rather than the
+fix. Recorded so nobody later "corrects" it.
+
+**2. The index symbol is `USDInd`, not `USDIndex`.** The terminal's title bar says
+`[USDInd,H1]`, and asking it confirms it: `symbol_info("USDInd")` returns a
+specification and `symbol_info("USDIndex")` returns `None`. A symbol list written
+from intuition would silently never resolve, and every trade on it would be refused
+as *unknown* rather than as a typo — the safe direction, and still a bug.
+
+**3. The bindings keep their state in module globals.** A direct
+`MetaTrader5.symbol_info` call *after* a `shutdown` answers `None` for every symbol.
+That produced a test asserting "this terminal describes no symbol at all", which was
+a fact about the binding's lifecycle and not about the terminal. It is now driven
+through the fixture's own connection, and the fixture is **function-scoped** for the
+same reason: a class-scoped one that calls `shutdown` after its last test leaves
+every earlier connection invalid for any test that runs afterwards, with a symptom
+that looks exactly like a terminal with no market data.
+
+### What was verified, live and read-only
+
+`BRIDGE_ALLOW_MT5_TESTS=1 python -m pytest tests/live` — **21 passed, 0 skipped.**
+
+* the terminal is running and logged in as `53184454`
+* the account provider reads balance, equity, currency and login from it
+* the symbol provider reads `trade_contract_size`, `trade_tick_size`,
+  `trade_tick_value_profit` and the rest — **the field names Phase 7 could not
+  verify, now verified against the real thing**
+* the position snapshot parses, is fresh, and reports `terminal_build 6230`
+* `open_positions` is readable through the account provider with the reader wired
+* the staleness limit agrees with `auto-trade`'s own default, at 30 seconds
+* an unknown symbol is refused rather than defaulted
+
+Nothing was clicked. Nothing was launched — the terminal was already up, and a test
+asserts the adapter package contains no `launch` attribute anywhere. No order was
+placed; this file's scope is reading and refusing.
+
+### One design decision worth stating
+
+`MetaTrader5` **was not installed** on this machine and Phase 11 installed it, which
+is why the live tests could run at all. That broke one existing test — the one
+asserting the loader's message when the package is *absent* — so it now **hides the
+module with `monkeypatch`** rather than relying on its absence. A test whose subject
+is "the dependency is not installed" has to be able to arrange that itself, on any
+machine, or it stops testing the moment somebody follows the instructions.
 
 ### What cannot be verified here at all
 
@@ -1664,7 +1756,7 @@ decide to trade and cannot yet trade.*
 
 ## Tests
 
-**972 collected, 967 passed, 5 skipped in about 5 seconds.** The suite runs
+**1005 collected, 999 passed, 6 skipped in about 8 seconds** (with the live opt-in set) The suite runs
 **without `albrooks` or `MetaTrader5` installed** and without a terminal — the
 MT5 adapter takes its bindings by injection, which is what makes that possible.
 
@@ -1694,7 +1786,7 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_domain_isolation.py` | 13 | The architectural invariant, parametrised over every domain module. |
 | `unit/test_defensive_guards.py` | 7 | Guards reachable only by bypassing model validation. |
 | `integration/test_albrooks_real.py` | 9 | The real `Analyzer`, so the stubs cannot drift unnoticed. **Not collected here** — `albrooks` is not installed on this machine, so the module skips at import. |
-| **Total** | **972 collected, 967 passed, 5 skipped** | |
+| **Total** | **989 passed, 16 skipped** without the opt-in; **999 passed, 6 skipped** with it |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1723,7 +1815,7 @@ The full gate, all clean:
 ruff check .            All checks passed!
 ruff format --check .   72 files already formatted
 mypy                    Success: no issues found in 37 source files
-pytest                  967 passed, 5 skipped
+pytest                  999 passed, 6 skipped  (BRIDGE_ALLOW_MT5_TESTS=1)
 ```
 
 > **`pytest tests/integration` could not be verified on this machine.** The nine
@@ -1908,25 +2000,31 @@ the two-phase port, and the `ExecutionRequest.take_profit` fix Phase 8 left open
 See *What Phase 10 Built* above. The composition root, and the `signal_id` repair
 Phase 9 left for here.
 
-#### Phase 11 — MT5 / demo validation
+#### Phase 11 — MT5 / demo validation  ← **built, and blocked on the machine**
 
-**Opt-in, and the only phase permitted to open a terminal or place an order.** The
-composition root refuses the live path precisely so this phase has somewhere to go:
-it builds the terminal adapter, assembles the `ExecutionWorkflow` with it, and
-removes the refusal.
+See *What Phase 11 Found* above. The live side is assembled by `live.py` and every
+read-only path is verified against the real terminal. **The one thing that cannot be
+done on this machine is the last 5%**: the control identifiers belong to build 6184
+and this terminal is 6230.
 
-Three things Phase 11 inherits and must not weaken:
+**What closing it needs, and it needs a human watching:**
 
-* **the default configuration still cannot execute.** Enabling it is a separate,
-  explicit act, and the root's refusal is what makes "we have not tried that yet" a
-  true statement.
-* **Known Issue 5 is confirmed, not suspected.** The terminal runs build **6230**;
-  `auto-trade`'s control ids were measured on **6184**. Re-measure every id before
-  anything is clicked.
-* **Nothing outside Phase 11 opens a terminal.** Reading the published position
-  snapshot is not opening one, and Phase 7 did that read-only.
+1. every identifier re-measured on build **6230**, at this display resolution
+2. the measurements recorded here **with the build they were measured on** — a
+   measurement without its build is a measurement that will be stale silently
+3. `MEASURED_ON_BUILD` in `live.py` updated, and `EXPECTED_BUILD` in
+   `scripts/control_ids.py` with it
 
-Phases 12 and 13 as laid out.
+Steps 1 and 2 are the whole of it. Step 3 is one line in two places.
+
+**What is already done and does not need repeating:** the data adapter is verified
+live, the dry run reports in full, the envelope carries its three collaborators, the
+ledger is durable and refuses when unreadable, and the default configuration still
+cannot trade.
+
+Phase 12 is documentation and developer experience; Phase 13 is the final
+architecture review. Neither needs a terminal, and Phase 12 is the natural next step
+while the identifiers wait.
 ## Open Questions
 
 ### Resolved
@@ -2418,7 +2516,7 @@ touched an adapter — and now partly relevant to Phase 7:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **967 tests should pass, 5 skipped.** If
+   virtual environment is not set up. **989 tests, 16 skipped, without the opt-in.** If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9

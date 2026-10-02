@@ -1062,7 +1062,6 @@ be one snapshot, so the equity that passed a margin check could be from a differ
 moment than the balance it was compared against. `balance()` returning a single
 frozen `AccountBalance` makes a torn read unrepresentable rather than merely
 discouraged.
-
 ### 5.10 The dry run — asking without sending
 
 Phase 8. `application/dry_run.py` turns a validated `TradeIntent` into the
@@ -1113,6 +1112,7 @@ refusal says exactly that, and **Phase 9 fixes the type** alongside the ledger.
 ---
 
 
+
 ### 5.11 The execution envelope — an absence, promoted to a type
 
 Phase 9. For three phases the rule was "the pipeline must not import an executor",
@@ -1153,6 +1153,46 @@ separate sink would be a second source of truth about what was placed. And wheth
 not this type's: that is a decision about a machine and an operator rather than about
 a trade.
 
+
+
+### 5.12 The live side, and the machine fact that gates it
+
+Phase 11. `live.py` assembles what `build_bridge` refuses to: the terminal adapter,
+the file-backed kill switch, the audit sink, the `ExecutionWorkflow` and the envelope
+around it. Two gates stand in front, and **neither is a configuration setting**:
+
+* **`check_control_ids`** reads the terminal's build from two independent sources —
+  the executable's version resource and the running process's own published snapshot —
+  requires them to agree, and requires the result to be the build the control
+  identifiers were measured on. A control identifier is a position in a window, not a
+  stable name: MT5 adds and removes controls between builds, so an id measured on one
+  build can address a different control, or nothing, on another.
+* **the terminal must already be running.** `initialize` connects; nothing launches.
+
+**Why two sources rather than one.** A terminal that was updated while running makes
+them disagree, and that is a real state — MT5 self-updates between launches. Preferring
+one would resolve a situation that should be resolved by a human. And "one source said
+so" is not agreement, so a single readable source leaves `agreed` false rather than
+true.
+
+**`demo_only=True` is hard-coded** in the live path with no parameter. A demo bridge
+that could be told to trade a live account is not a demo bridge, and a flag is exactly
+the sort of thing that gets set by accident.
+
+### 5.13 Two things the terminal said that documentation did not
+
+Recorded because both are the kind of fact a project argues about from memory and
+gets wrong:
+
+* **`account_info().name` is the account holder's display name, not the server.** The
+  terminal's title bar carries the server (`53184454 - Alpari-MT5-Demo: ...`);
+  `name` carries `"YouJos Hundred"`. The bridge maps that field to
+  `AccountBalance.server``, so a log line reading `server=YouJos Hundred` is the
+  adapter reporting faithfully. The field name belongs to the terminal.
+* **the index symbol is `USDInd`, not `USDIndex`.** Confirmed by asking: one returns a
+  specification, the other returns nothing. A symbol list written from intuition would
+  never resolve, and every trade on it would be refused as *unknown* rather than as a
+  typo — the safe direction, and still a bug.
 
 ## 6. Anti-corruption layer
 
