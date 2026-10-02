@@ -1,9 +1,9 @@
-"""Re-measuring the control identifiers, because the build moved.
+"""Verifying that the control identifiers belong to this build.
 
-**Known Issue 5, and this is its remedy.** `auto-trade`'s control identifiers were
+**Known Issue 5, and its current state.** `auto-trade`'s control identifiers were
 measured on Alpari build **6184**. This machine runs **6230** -- a 46-build gap,
 confirmed from two independent sources (the live position snapshot's
-``terminal_build`` field and ``terminal64.exe``'s ``FileVersion``). The upstream
+``terminal_build`` field and `terminal64.exe`'s ``FileVersion``). The upstream
 project's own rule is unambiguous:
 
 > **Never substitute a control identifier you have not measured.** A control found
@@ -25,14 +25,22 @@ does not click anything.** Measurement on a live window is a separate, later ste
 this deliberately does not do it -- a script that both measures and wires is a script
 that can do both in the wrong order.
 
-### Running it
+### The re-measurement that changed ``EXPECTED_BUILD``
 
-```powershell
-python scripts/control_ids.py
-```
+The measurement is `auto-trade terminal-check`, which is upstream's own read-only
+probe. It opens the order dialog, reads the control tree, reports each expected
+identifier as OK / DRIFTED / MISSING, and closes the dialog -- a dialog left open over
+a trading terminal is a market order waiting to happen.
 
-Exit code 0 means the build is the expected one. Exit code 1 means it is not, and
-the measured identifiers must not be used until they are re-measured.
+On build 6230 it reported 13 of 13 controls OK: every identifier in this project was
+found where it was measured for. So ``EXPECTED_BUILD`` became 6230, **after** the
+evidence rather than instead of it, and the report is kept in
+``logs/terminal_check.json``. Had anything read DRIFTED or MISSING, the number would
+not have moved and this file would name the control that moved.
+
+**Running it here again will still exit 1 on the next MT5 update, and that is the
+design working.** A check that can only be cleared by measuring is the difference
+between a measurement and a number somebody edited to quiet a warning.
 """
 
 from __future__ import annotations
@@ -51,7 +59,19 @@ TERMINAL = Path(r"C:\Program Files\Alpari MT5_4\terminal64.exe")
 
 #: The build the measured identifiers belong to. **A different build is a refusal,
 #: not a warning** -- see the module docstring.
-EXPECTED_BUILD = 6184
+#:
+#: **6230 since the Phase 13 re-measurement.** It was 6184, and this terminal runs
+#: 6230, so this script refused. The number moved only after `auto-trade
+#: terminal-check` reported every expected identifier present, in place, on 6230 --
+#: 13 of 13 controls OK, nothing drifted. The evidence is in
+#: `logs/terminal_check.json`, and the probe that produced it is upstream's own
+#: read-only one, which closes the dialog it opens.
+#:
+#: This script still only *reports*. It does not measure, and it must not: a script
+#: that both measures and wires is a script that can do both in the wrong order. To
+#: re-measure after the next MT5 update, run `auto-trade terminal-check` first, and
+#: change this number only if it reports OK for every control.
+EXPECTED_BUILD = 6230
 
 
 def terminal_build(terminal: Path) -> int | None:
@@ -99,25 +119,50 @@ def snapshot_build(data_path: Path) -> int | None:
 
 
 def measured_identifiers(upstream: Path) -> dict[str, int] | None:
-    """Read the identifiers upstream measured, and the build they were measured on.
+    """The identifiers upstream's order path actually uses, read from its source.
 
-    Parsed out of the source rather than configured here, so this script cannot
-    disagree with the project it is checking. Returns ``None`` if the file has moved
-    or the shape is unfamiliar -- and a shape this script does not recognise is
-    itself a refusal, not something to keep parsing.
+    Read from ``control_probe.EXPECTED_FIELDS`` and ``EXPECTED_FINAL_CONTROLS``, which
+    is where upstream keeps the controls its probe expects to find. Those are
+    imported from the same modules the order path uses, so a probe cannot pass
+    against a stale copy -- which is upstream's own reason for putting them there,
+    and a good enough reason to read them from there.
+
+    Returns ``None`` if upstream is absent or the shape is unfamiliar, and a shape
+    this script does not recognise is itself a refusal rather than something to keep
+    parsing.
+
+    ### What this deliberately does *not* return
+
+    The build the identifiers were measured on. **Upstream does not record it.**
+    There is no string anywhere in ``auto-trade`` naming a build its identifiers
+    were measured against, so the earlier version of this function -- which looked
+    for ``NNNN build`` and returned ``None`` when it found nothing -- was asking
+    upstream for a fact upstream does not have.
+
+    That provenance lives in *this* repository, in ``live.MEASURED_ON_BUILD`` and in
+    :data:`EXPECTED_BUILD`, and it is backed by the recorded probe report at
+    ``logs/terminal_check.json``. Saying so is more useful than a cross-check
+    against a value that was never there: a check that looks like it is verifying
+    provenance against an independent source, and is not, is worse than none.
     """
-    for candidate in upstream.rglob("*.py"):
-        try:
-            text = candidate.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if "control_id" not in text.lower() and "CONTROL" not in text:
-            continue
-        found = {k: int(v) for k, v in re.findall(r'"?([A-Z_]{4,})"?\s*[:=]\s*(\d{3,6})', text)}
-        build = re.search(r"(\d{4})\s*(?:build|Build)", text)
-        if found and build:
-            return found
-    return None
+    try:
+        sys.path.insert(0, str(upstream / "src"))
+        from auto_trade.infrastructure.automation.control_probe import (
+            EXPECTED_FIELDS,
+            EXPECTED_FINAL_CONTROLS,
+        )
+    except Exception:
+        return None
+    finally:
+        if sys.path and sys.path[0] == str(upstream / "src"):
+            sys.path.pop(0)
+
+    found: dict[str, int] = {}
+    for label, value in EXPECTED_FIELDS:
+        found[f"field:{label}"] = int(value)
+    for label, _name, value in EXPECTED_FINAL_CONTROLS:
+        found[f"final:{label}"] = int(value)
+    return found or None
 
 
 def main() -> int:
@@ -172,13 +217,32 @@ def main() -> int:
 
     identifiers = measured_identifiers(UPSTREAM)
     if identifiers is None:
-        print("\n  REFUSING: upstream's measured identifiers could not be read.")
+        print("\n  REFUSING: upstream's control identifiers could not be read.")
         return 1
 
-    print(f"\n  measured identifiers (build {EXPECTED_BUILD}):")
+    print(f"\n  identifiers this project uses, read from upstream's probe ({len(identifiers)}):")
     for name, value in sorted(identifiers.items()):
         print(f"    {name:32} {value}")
-    print("\n  OK -- the build matches. Re-measurement is not required.")
+
+    print(f"""
+  OK -- the build matches.
+
+    Where the build provenance lives
+    --------------------------------
+    EXPECTED_BUILD = {EXPECTED_BUILD} is recorded in THIS repository, not in
+    auto-trade, because upstream keeps no record of the build its identifiers were
+    measured on. It is backed by a read-only probe whose report is kept beside the
+    logs:
+
+      logs/terminal_check.json
+
+    Re-measure after the next MT5 update with:
+
+      auto-trade terminal-check
+
+    and change EXPECTED_BUILD only if that reports OK for every control. A
+    DRIFTED or MISSING row means the constant must not move.
+""")
     return 0
 
 

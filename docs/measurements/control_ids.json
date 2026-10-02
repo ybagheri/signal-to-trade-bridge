@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "Durable record of a control-identifier measurement. Produced by:",
+    "  auto-trade terminal-check",
+    "which is upstream's read-only probe: it opens the order dialog, reads the",
+    "control tree, reports each expected identifier, and closes the dialog. No",
+    "field is written and no final control is clicked.",
+    "",
+    "tests/unit/test_control_id_evidence.py reads this file, so MEASURED_ON_BUILD",
+    "in src/signal_to_trade_bridge/live.py cannot be changed without a record",
+    "here that says the same build was measured and nothing was found drifted or",
+    "missing. Regenerate it with scripts/record_control_ids.py after any MT5",
+    "update -- and only if the probe reports OK for every control."
+  ],
+  "measured_on_build": 6230,
+  "observed_at": "2026-10-02T08:27:54Z",
+  "command": "auto-trade terminal-check",
+  "verdict": "OK",
+  "checked": 13,
+  "drifted": [],
+  "missing": [],
+  "account_type": "DEMO",
+  "controls": {
+    "symbol": {
+      "identifier": "10325",
+      "status": "OK"
+    },
+    "volume": {
+      "identifier": "10333",
+      "status": "OK"
+    },
+    "stop_loss": {
+      "identifier": "10334",
+      "status": "OK"
+    },
+    "take_profit": {
+      "identifier": "10336",
+      "status": "OK"
+    },
+    "trade_grid": {
+      "identifier": "10328",
+      "status": "OK"
+    },
+    "buy": {
+      "identifier": "10408",
+      "status": "OK"
+    },
+    "sell": {
+      "identifier": "10409",
+      "status": "OK"
+    }
+  },
+  "also_present": [
+    "account_type",
+    "market_execution_button",
+    "new_order_menu_item",
+    "position_observation",
+    "terminal_build",
+    "terminal_identity"
+  ]
+}

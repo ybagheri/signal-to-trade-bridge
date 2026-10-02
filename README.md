@@ -67,11 +67,11 @@ either.
 | 8 | Dry run / simulation mode | 𧀅 complete |
 | 9 | Idempotency and duplicate protection | 𧀅 complete |
 | 10 | End-to-end integration | 𧀅 complete |
-| 11 | MT5 / demo validation (isolated, opt-in) | ▸ partial — blocked on control ids |
+| 11 | MT5 / demo validation (isolated, opt-in) | 𧀅 complete — live side assembles |
 | 12 | Documentation, CLI, public API | 𧀅 complete |
 | 13 | Final architecture review | 𧀅 complete |
 
-**1189 tests passing, 98% coverage.** Lint, format, type check, the
+**1205 tests passing, 98% coverage.** Lint, format, type check, the
 domain-isolation check and a full layer-graph check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
@@ -84,12 +84,20 @@ turned into a `TradeDecision` carrying either a reason code or a fully sized
 intent. The account snapshot the concurrency gate reads also comes from the terminal
 now, from the position file its own indicator publishes.
 
-**What does not:** act on the decision **from the pipeline**. The executor exists, and
-it is tested against the execution project's real workflow rather than a double, but
-it is deliberately **not** wired into `ProcessSignal` yet — execution arrives with
-the idempotency ledger and the kill switch around it, not before, and a test asserts
-the pipeline imports no executor while that holds. A volume below the broker's minimum
-is refused rather than floored up, always.
+**What does not:** trade. The live side now **assembles** on this machine — the
+control identifiers were re-measured on this terminal's build and all thirteen
+matched, with the report kept in `logs/terminal_check.json` — but assembling is not
+sending, and the default configuration still cannot send:
+
+- `build_bridge()` returns `can_execute=False` and attaches no executor, so a signal
+  through the ordinary path produces a decision with **no execution result at all**.
+  That is a code path, not a setting, and no environment variable reaches it.
+- `BRIDGE_EXECUTION_ENABLED=false` and `BRIDGE_DRY_RUN=true` are the shipped
+  defaults. Reaching `build_live()` requires a deliberate call with both changed,
+  plus a `DEMO` account, a readable ledger and a clear kill switch.
+
+No order has been placed by this project. A volume below the broker's minimum is
+refused rather than floored up, always.
 
 ---
 
@@ -138,9 +146,10 @@ reason   PIPELINE_PASSED
   risk       499.9998
 ```
 
-**No command can place an order.** The live path needs control identifiers
-measured against your terminal's exact build, and that measurement cannot be done
-from a script. See [docs/setup.md §8](docs/setup.md#8-the-control-identifier-refusal).
+**No command here can place an order.** The live path assembles on a correctly
+measured machine — and even then it is a separate call nobody in this CLI makes.
+`doctor` reports whether the control identifiers match your terminal's build, and
+refuses if they do not. See [docs/setup.md §8](docs/setup.md#8-the-control-identifiers-and-why-they-are-measured).
 
 The exit codes are the contract, so a shell script never has to parse the output:
 

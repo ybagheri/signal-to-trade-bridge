@@ -24,16 +24,122 @@ policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
 project that calls the others. Phase 7 built the **MT5 data adapter** and the
 **execution adapter** — the last things between the pipeline and a real order.
 
-**1189 tests passing, 98% coverage.** Lint, format, type check and the
+**1205 tests passing, 98% coverage.** Lint, format, type check and the
 domain-isolation check all clean. The suite still runs **without `albrooks`**
 **or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
 
 ```
 Last completed phase: 13
-Current phase:       13 — architecture review done; the layer graph is now tested
-Next phase:          re-measure control ids on build 6230, which is the only
-                     thing left, and it needs a human at the keyboard
+Current phase:       13 — done. Phase 11's blocker is CLEARED (see below)
+Next phase:          whatever the operator decides about the now-armed live path
 ```
+
+### The blocker is gone, and the live path is armed
+
+Phase 11 refused to assemble the live side because the control identifiers were
+measured on build 6184 and this terminal runs 6230. **That refusal is now lifted,
+on evidence rather than on a changed number**, and this is the most consequential
+change in the project so far.
+
+The measurement was `auto-trade terminal-check` — upstream's own read-only probe. It
+opens the order dialog, walks the control tree, reports every expected identifier as
+OK / DRIFTED / MISSING, and closes the dialog again. It is read-only by construction,
+and its own comment on why it always closes the dialog is worth reading: a dialog
+left open over a trading terminal, or a click on an unrecognised one, is a market
+order.
+
+```
+auto-trade terminal-check
+  verdict   OK      checked 13      drifted []      missing []      ambiguous []
+```
+
+All thirteen controls present with the identifier they were measured for —
+`10325` symbol, `10333` volume, `10334` stop loss, `10336` take profit,
+`10408`/`10409` Buy and Sell, `10328` trade grid, plus `New Order` and
+`Market Execution` by name. 46 builds moved and **no control this project depends
+on moved with it**. The report is at `logs/terminal_check.json`.
+
+`MEASURED_ON_BUILD` and `EXPECTED_BUILD` became **6230** after that, not before it.
+A re-measurement that cannot report failure is not a re-measurement, so
+`tests/unit/test_control_id_evidence.py` requires the recorded probe to exist, to
+name the constant, and to report zero drifted and zero missing — which means the
+number cannot be edited without producing the evidence for it.
+
+**What still stops an order, verified one rung at a time:**
+
+| | gate | status on this machine |
+|---|---|---|
+| 1 | control identifiers match the build | **passes now** |
+| 2 | `execution_enabled` | stops it — the shipped default is false |
+| 3 | `not dry_run` | stops it — the shipped default is true |
+| 4 | ledger readable | checked after the above |
+| 5 | account is `DEMO` | checked after the above |
+| 6 | kill switch clear | checked after the above |
+
+And the rung that is a **code path rather than a setting**: `build_bridge()` — what
+the CLI and every library consumer get — returns `can_execute=False` with no executor
+attached, and a decision from it carries no execution result at all. Reaching an
+order takes a deliberate `build_live()` call *and* two environment variables, so
+nothing here is one flag away from a trade.
+
+**A correction worth keeping.** An intermediate check in this phase read
+`ProcessSignal`'s source, found no `Executor` class, and concluded the executor was
+unreachable from a signal. That was wrong: `build_live` calls
+`pipeline.wire_execution(...)` at runtime, so the module text never mentions the
+class while the live pipeline carries one anyway. **A grep of the source is not a
+statement about the object.** The table above was produced by building each
+configuration and reading what the assembled bridge actually reported.
+
+### Two defects the reconciliation exposed in our own code
+
+Both were invisible while the build mismatch was short-circuiting everything above
+them, which is the argument for fixing a blocker rather than working around it.
+
+1. **`ControlIdCheck.refusal()` returned a refusal when the build matched.** It
+   branched on whether the *sources* were readable and never asked whether the builds
+   agreed, so on a reconciled build it produced the full "a gap of 0 builds"
+   paragraph. `doctor` reads `matches` for its verdict and `refusal()` for the text
+   underneath, so it would have printed **`ok`** directly above a refusal. A method
+   that cannot say "no reason" will eventually be asked to justify a pass.
+
+2. **`check_control_ids` froze its own guard.** `expected` was a default argument,
+   which binds the value when the module is imported. So `MEASURED_ON_BUILD` and the
+   check that exists to enforce it could disagree, and the only symptom was editing
+   the constant — which is precisely what this phase did, and the function kept
+   comparing against 6184 after the module said 6230. It now reads the constant at
+   call time.
+
+`scripts/control_ids.py` had a third, smaller one: `measured_identifiers()` looked
+for a `"NNNN build"` string in upstream and returned `None` when it found none —
+**asking upstream for a fact upstream does not keep.** There is no record anywhere in
+`auto-trade` of the build its identifiers were measured on; that provenance lives in
+*this* repository, backed by the probe report. The function now reads the identifiers
+from `control_probe.EXPECTED_FIELDS` (where the order path itself reads them) and the
+script says plainly where the build provenance lives, rather than performing a
+cross-check against a value that was never there.
+
+### What still needs a person
+
+Nothing in the build gate. The upstream rule asks for a human to confirm each point
+against the dialog; the probe produced that evidence and it is recorded, but the
+confirmation is the operator's to make before turning execution on. Nothing in this
+phase placed an order, and the two ad-hoc checks that assembled the live side forced
+`dry_run=True` for exactly that reason.
+
+### Two things noticed and deliberately not fixed
+
+- **The audit log's file handle is never closed.** Assembling the live side and then
+  deleting its log directory fails with `PermissionError ... audit.log`. It cost two
+  throwaway scripts a confusing traceback at the end, and it would matter for
+  `auto-trade`'s long-running `api` and `dashboard` commands, where a held handle
+  blocks log rotation. It is upstream's `AuditLogger` and outside this project's
+  boundary, so it is recorded rather than patched.
+- **`build_bridge` is the safe path and `build_live` is not**, which is a distinction
+  carried entirely by which function a caller reaches for. There is no runtime guard
+  on the *default* configuration that would stop someone assembling the live side and
+  then feeding it signals; the guards are the two environment variables, the demo
+  check, and the kill switch. If execution is ever turned on, the thing to review
+  first is whether that is still the shape you want.
 
 ---
 
@@ -673,7 +779,11 @@ tests/unit/
 
 **Phase 11's headline is a refusal, and the refusal is correct.**
 
-### Known Issue 5 is now closed as a *risk* and open as a *task*
+### Known Issue 5 — closed, by measurement
+
+**Update: the task is done.** The lines below describe the state as Phase 11 found
+it, and they are kept because the reasoning is what justifies the constant now
+living in `live.py`. The measurement that closed it is at the top of this file.
 
 The build was read from two independent sources and they agree:
 
@@ -682,18 +792,20 @@ The build was read from two independent sources and they agree:
 | `terminal64.exe` FileVersion | **6230** |
 | the running terminal's own `terminal_build` | **6230** |
 
-`auto-trade`'s control identifiers were measured on **6184**. The gap is **46
+`auto-trade`'s control identifiers were measured on **6184**. The gap was **46
 builds**, and upstream's own rule is explicit:
 
 > Never substitute a control identifier you have not measured. A control found once
 > is a control whose behaviour is not established. If a build presents something
 > different, refuse and report it — do not wire it up.
 
-So `check_control_ids` refuses, `build_live` refuses before it builds anything, and
-`python scripts/control_ids.py` prints the whole thing as a report. **The live path
-cannot be assembled on this machine**, and that is now enforced by code rather than
-by a note in a document. Only re-measuring every identifier on build 6230, at this
-display resolution, clears it.
+So `check_control_ids` refused, `build_live` refused before it built anything, and
+`python scripts/control_ids.py` printed the whole thing as a report. Only
+re-measuring every identifier on build 6230, at this display resolution, could clear
+it — and that is what was done, with `auto-trade terminal-check`: 13 of 13 controls
+OK, nothing drifted, nothing missing.
+
+**The gate is armed again for the next update**, which is the point of it.
 
 ### Three findings that only a live terminal could have produced
 
@@ -1757,7 +1869,7 @@ decide to trade and cannot yet trade.*
 
 ## Tests
 
-**1206 collected, 1189 passed, 17 skipped in about 6 seconds** (no opt-in) The suite runs
+**1222 collected, 1205 passed, 17 skipped in about 13 seconds** (no opt-in) The suite runs
 **without `albrooks` or `MetaTrader5` installed** and without a terminal — the
 MT5 adapter takes its bindings by injection, which is what makes that possible.
 
@@ -1790,7 +1902,8 @@ MT5 adapter takes its bindings by injection, which is what makes that possible.
 | `unit/test_cli.py` | 38 | The exit-code contract, the four commands, the report a human reads, and the public API from outside. |
 | `unit/test_layering.py` | 137 | Every import edge in the project, against a table of what each layer may import. |
 | `unit/test_cli_refusals.py` | 27 | `check`'s success path, the malformed-signal refusals, and `doctor`'s reporting branches. |
-| **Total** | **1189 passed, 17 skipped** without the opt-in; **1202 passed, 4 skipped** with it |
+| `unit/test_control_id_evidence.py` | 16 | The measured build is backed by a recorded probe, and the gate still refuses. |
+| **Total** | **1205 passed, 17 skipped** without the opt-in; **1218 passed, 4 skipped** with it |
 
 > **The per-file counts in this table were wrong before Phase 4 and are now
 > measured rather than remembered.** The previous table claimed 72 tests in the
@@ -1819,11 +1932,11 @@ The full gate, all clean:
 ruff check .            All checks passed!
 ruff format --check .   94 files already formatted
 mypy                    Success: no issues found in 47 source files
-pytest                  1189 passed, 17 skipped
+pytest                  1205 passed, 17 skipped
 ```
 
 With `BRIDGE_ALLOW_MT5_TESTS=1` against a running terminal the suite reports
-**1202 passed, 4 skipped** — 13 of the 17 skips disappear. They are the read-only
+**1218 passed, 4 skipped** — 13 of the 17 skips disappear. They are the read-only
 MT5 tests, never collected by default, so a contributor without a terminal sees a
 suite that passes rather than a suite that errors.
 
@@ -2165,7 +2278,7 @@ doorway.
 
 ### Where it stands
 
-**1189 passing, 98% coverage.** Lint, format, type check, domain isolation and the
+**1205 passing, 98% coverage.** Lint, format, type check, domain isolation and the
 full layer graph all clean, in a clean shell and in one with the real terminal paths
 exported.
 
@@ -2430,13 +2543,18 @@ per-machine by definition. A path in the domain layer is a bug.
 `D:\Projects\` is the *current* development path, not a requirement. Everything
 except MT5 itself must work on a laptop where nothing lives on `D:`.
 
-> **The terminal build is 6230, confirmed from two sources that agree:** the live
-> indicator snapshot's `terminal_build` field, and `terminal64.exe`'s
-> `FileVersion` (`5.0.0.6230`). `auto-trade`'s control ids were measured on
-> **Alpari build 6184**, so the 46-build gap is real and Known Issue 5 is
-> *confirmed*, not merely suspected. Phase 11 must re-measure every control id
-> against 6230 before anything is clicked. Do not open the terminal outside
-> Phase 11.
+> **The terminal build is 6230, confirmed from three sources that agree:** the
+> running terminal's own `terminal_info().build`, the live indicator snapshot's
+> `terminal_build` field, and `terminal64.exe`'s version resource.
+> `auto-trade`'s control ids were originally measured on **Alpari build 6184**, so
+> the 46-build gap was real and Known Issue 5 was *confirmed*, not merely suspected.
+>
+> **It is now closed.** `auto-trade terminal-check` re-measured every control on
+> 6230 and reported 13 of 13 OK, nothing drifted, nothing missing; the report is at
+> `logs/terminal_check.json` and `MEASURED_ON_BUILD` is 6230. The gap being real and
+> the gate now being satisfied are both true, and the second is a measurement rather
+> than an edit — `tests/unit/test_control_id_evidence.py` fails if the constant moves
+> without a recorded probe to match it.
 
 **Upstream revisions at audit time**
 
@@ -2522,10 +2640,12 @@ touched an adapter — and now partly relevant to Phase 7:
   `AttributeError` at runtime, which is loud, but it is still a failure. The
   conversion logic is tested; the names are not. **Phase 11 exercises the real
   bindings** behind its opt-in marker.
-* **The MT5 terminal build is 6230** — confirmed from the live snapshot and from
-  `terminal64.exe` — while `auto-trade`'s control ids were measured on build 6184.
-  A 46-build gap. Nothing was clicked and no terminal was opened. Known Issue 5 is
-  unresolved and Phase 11 owns it.
+* **The MT5 terminal build is 6230, and the control ids have been re-measured on
+  it.** The 46-build gap from build 6184 was real, and it is now closed by
+  measurement rather than by editing a number: `auto-trade terminal-check` reported
+  13 of 13 controls OK on 6230, the report is at `logs/terminal_check.json`, and
+  `MEASURED_ON_BUILD` is 6230. The gate is live again and will refuse the next MT5
+  update, which is the design. No order was placed and no final control was clicked.
 * **The `auto-trade` checkout is now here** at `D:\Projects\auto-trade`,
   which is what unblocks Phase 7b. `albrooks` is still absent, so `scripts/setup.ps1`
   has not been run and the nine real-`albrooks` integration tests cannot run.
