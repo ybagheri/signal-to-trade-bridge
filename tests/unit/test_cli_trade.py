@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from signal_to_trade_bridge.cli import EXIT_FAULT, EXIT_OK, EXIT_REFUSED, main
+from signal_to_trade_bridge.cli import EXIT_FAULT, EXIT_REFUSED, main
 
 SIGNAL = {
     "id": "t-1",
@@ -160,7 +160,15 @@ class TestBadInput:
 
 
 class TestWhatIf:
-    """`--what-if` must never send, whatever else is true of the configuration."""
+    """The sending half of `--what-if` lives in `test_cli_whatif.py`.
+
+    It was split out because it is a different kind of claim: the rest of this file
+    tests *refusals* and needs no collaborators at all, while "this flag does not
+    send" has to stand up a pipeline, wire an envelope into it, and check what was
+    attached at the moment the signal was handled. Mixing the two in one class
+    hid that distinction, and the flag's whole contract was the thing that went
+    wrong in the first place.
+    """
 
     def test_it_needs_confirm_demo_too(self, signal_file: Path) -> None:
         # Deliberate. `--what-if` sends nothing, so requiring the acknowledgement for
@@ -170,18 +178,6 @@ class TestWhatIf:
         code, output = _run("trade", str(signal_file), "--what-if")
         assert code == EXIT_REFUSED
         assert "--confirm-demo" in output
-
-    def test_it_says_plainly_that_nothing_was_sent(
-        self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        _isolated(monkeypatch, tmp_path, BRIDGE_EXECUTION_ENABLED="true", BRIDGE_DRY_RUN="false")
-        code, output = _run("trade", str(signal_file), "--confirm-demo", "--what-if")
-        # Reaches the live build on this machine, so the code depends on the terminal
-        # being reachable; either way the promise is what matters.
-        assert code in (EXIT_OK, EXIT_REFUSED, EXIT_FAULT)
-        if "--what-if was given" in output:
-            assert "nothing was sent" in output
-            assert "would have sent" in output
 
 
 class TestTheCommandSurface:

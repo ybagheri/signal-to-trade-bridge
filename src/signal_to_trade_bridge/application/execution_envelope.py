@@ -117,6 +117,33 @@ class ExecutionEnvelope:
         )
 
 
+def with_executor(envelope: ExecutionEnvelope, executor: TradeExecutor) -> ExecutionEnvelope:
+    """The same envelope with a different executor, and everything else untouched.
+
+    The envelope is immutable by design -- "an executor without a ledger" is meant to
+    be unrepresentable, and swapping one collaborator out from under it would be the
+    hole that design closes. So this does not mutate anything: it reads the two
+    collaborators that must **not** change and rebuilds the envelope through
+    :func:`build_execution_envelope`, which re-runs every check.
+
+    The kill switch and the ledger are carried over exactly. Swapping the executor
+    must not become a way to lose the kill switch, and rebuilding rather than
+    patching means the factory's refusals -- an executor that is also the ledger,
+    say -- still apply instead of being bypassed.
+
+    **This lives here rather than in the CLI** because the CLI is not allowed to
+    import `adapters/`, and the only executor it has any business substituting is a
+    recorder. `tests/unit/test_layering.py` is what enforces that, and it was right
+    to fail: an interface layer reaching into an adapter directory for a double is
+    the shape that turns a preview into a second production path.
+    """
+    return build_execution_envelope(
+        executor=executor,
+        idempotency=envelope.idempotency,
+        kill_switch=envelope.kill_switch,
+    )
+
+
 def build_execution_envelope(
     executor: TradeExecutor,
     idempotency: IdempotencyStore,
