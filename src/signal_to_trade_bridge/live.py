@@ -8,9 +8,8 @@ specific things I checked"**, which is a different and much better place for it 
 ### Gate 1: the control identifiers must belong to this build
 
 A control identifier is a *position in a window*, not a stable name. MT5 adds and
-removes controls between builds, so an id measured on build 6184 can address a
-different control, or nothing, on build 6230 -- and this machine is 46 builds ahead
-of the one the identifiers were measured on.
+removes controls between builds, so an id measured on one build can address a
+different control, or nothing, on another.
 
 `auto-trade`'s own rule is explicit: *"Never substitute a control identifier you have
 not measured... If a build presents something different, refuse and report it."* So
@@ -21,6 +20,43 @@ measured on.**
 `scripts/control_ids.py` is the same check as a runnable report. This is the version
 the composition root calls, because a check nobody runs is a check that will not be
 there when it matters.
+
+**The re-measurement, and what it found.** The identifiers were originally measured
+on build 6184 and this terminal runs 6230 -- 46 builds, which is why Gate 1 refused.
+The remedy was never to change the number, so the number was changed **after a
+measurement**:
+
+```
+auto-trade terminal-check
+```
+
+`auto_trade.interfaces.preflight.run_check` is upstream's own read-only probe. It
+opens the order dialog, walks the control tree, reports every expected identifier as
+OK / DRIFTED / MISSING, and closes the dialog again -- a dialog left open over a
+trading terminal, or a click on an unrecognised one, is a market order.
+
+The result on build 6230, recorded in `logs/terminal_check.json`:
+
+| control | measured | found |
+|---|---|---|
+| `symbol` | 10325 | 10325 |
+| `volume` | 10333 | 10333 |
+| `stop_loss` | 10334 | 10334 |
+| `take_profit` | 10336 | 10336 |
+| `final_control_buy` | 10408 | 10408 |
+| `final_control_sell` | 10409 | 10409 |
+| `trade_grid` | 10328 | 10328 |
+
+13 of 13 controls OK, nothing drifted, nothing missing. The build moved and no
+control this project depends on moved with it, so the measured-on build is now
+**6230**.
+
+**Why that is a measurement and not a bypass.** The constant moved from 6184 to 6230
+*after* every identifier was observed in place on 6230, which is the opposite of
+the failure the rule exists to prevent. Had any control read DRIFTED or MISSING, the
+constant would not have moved and the table above would name the control that moved
+instead. A re-measurement that cannot report failure is not a re-measurement, so
+`check_control_ids` keeps refusing the moment the build changes again.
 
 ### Gate 2: the terminal must already be running and logged in
 
@@ -69,7 +105,18 @@ __all__ = [
 ]
 
 #: The build `auto-trade`'s control identifiers were measured on.
-MEASURED_ON_BUILD = 6184
+#:
+#: **6230, since the Phase 13 re-measurement.** It was 6184, and this terminal runs
+#: 6230, so :func:`check_control_ids` refused. The constant was changed only *after*
+#: `auto-trade terminal-check` reported all 13 controls present with the identifier
+#: they were measured for, on 6230 -- the probe is upstream's, it is read-only, and
+#: the evidence is kept in `logs/terminal_check.json`. See the module docstring for
+#: the table.
+#:
+#: **The next MT5 update will set this check off again, and that is the design.** A
+#: number that only ever moves when a measurement says so is the difference between a
+#: measurement and a constant somebody changed to make a test pass.
+MEASURED_ON_BUILD = 6230
 
 
 class BuildMismatch(CompositionRefusal):
@@ -103,7 +150,19 @@ class ControlIdCheck:
         return self.agreed and self.build == self.expected
 
     def refusal(self) -> str:
-        """Why not, in one paragraph an operator can act on."""
+        """Why not, in one paragraph an operator can act on.
+
+        **Empty when there is nothing to refuse**, and that is a real case that used
+        to be wrong: the build was reconciled on 6230, ``matches`` became ``True``,
+        and this method still returned the full "a gap of 0 builds" paragraph --
+        because it branched on whether the *sources* were readable and never asked
+        whether the builds agreed. ``doctor`` reads ``matches`` for its verdict and
+        ``refusal()`` for the text under it, so it would have printed **ok** directly
+        above a refusal. A method that cannot say "no reason" will eventually be
+        asked to justify a pass.
+        """
+        if self.matches:
+            return ""
         readable = {k: v for k, v in self.sources.items() if v is not None}
         if not readable:
             return (
@@ -132,14 +191,22 @@ class ControlIdCheck:
 
 
 def check_control_ids(
-    terminal: Path, data_path: Path | None = None, *, expected: int = MEASURED_ON_BUILD
+    terminal: Path, data_path: Path | None = None, *, expected: int | None = None
 ) -> ControlIdCheck:
     """Read the build from two independent sources and compare it.
 
-    Two, because one is a file on disk and the other is a running process reporting
-    on itself, and the whole point of the check is that they are not the same thing.
-    Where the second is unavailable -- no published snapshot, no indicator attached --
-    the first stands alone and ``agreed`` is ``False`` rather than ``True``, because
+    ``expected`` defaults to :data:`MEASURED_ON_BUILD`, read at **call** time rather
+    than bound at definition time. A default argument freezes the value when the
+    module is imported, so the constant and the check it is supposed to guard could
+    disagree -- and the only way to notice would be to edit the constant, which is
+    exactly what happened when the re-measurement moved it: the function kept
+    comparing against 6184 no matter what the module said.
+
+    Two sources, because one is a file on disk and the other is a running process
+    reporting on itself, and the whole point of the check is that they are not the
+    same thing. Where the second is unavailable -- no published snapshot, no
+    indicator attached -- the first stands alone and ``agreed`` is ``False`` rather
+    than ``True``, because
     "one source said so" is not agreement.
 
     Read-only throughout. It reads the executable and the snapshot file; it does not
@@ -155,7 +222,7 @@ def check_control_ids(
     return ControlIdCheck(
         build=readable[0] if readable else None,
         sources=sources,
-        expected=expected,
+        expected=MEASURED_ON_BUILD if expected is None else expected,
         agreed=len(readable) >= 2 and len(set(readable)) == 1,
     )
 

@@ -252,34 +252,35 @@ signal-to-trade-bridge doctor
 signal-to-trade-bridge
   version            0.1.0
 
-  cannot run here
-    - the measured control identifiers do not belong to this terminal's build. The
-      live path is refused, and no configuration clears it -- run
-      python scripts/control_ids.py for the details.
-
   MetaTrader5        ok
   auto_trade         ok
   terminal           C:\Program Files\Alpari MT5_4\terminal64.exe
   data directory     C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352D...
-  control ids        REFUSED
-    build            6230 (ids measured on 6184)
-    The measured control identifiers belong to build 6184 and this terminal is
-    build 6230 -- a gap of 46 builds. Upstream's rule is explicit: never
-    substitute a control identifier you have not measured, and if a build presents
-    something different, refuse and report it.
+  control ids        ok
+    build            6230 (ids measured on 6230)
 ```
 
-The `cannot run here` block is the answer, and it comes first on purpose — the
-`ok` / `REFUSED` marks below it are corroboration rather than the only signal. If a
-path you configured is wrong, it is named there:
+The `cannot run here` block is the answer when there is one, and it comes first on
+purpose — the `ok` / `REFUSED` marks below it are corroboration rather than the only
+signal. If a path you configured is wrong, it is named there:
 
 ```
   cannot run here
     - no terminal at C:\Program Files\Alpari MT5_4\termnal64.exe
 ```
 
-That `REFUSED` is the correct answer, and §8 explains why it cannot be configured
-away.
+**`control ids: ok` means the identifiers were measured on this build**, not that
+they are probably fine. A control identifier is a position in a window, and MT5
+moves controls between builds, so the number in brackets is the only thing that
+makes them usable. §8 explains how it got there and how to refresh it.
+
+Note that `control ids: ok` does **not** mean the bridge can trade. It is one gate
+of several; `config` shows the two that matter most:
+
+```json
+"dry_run": true,
+"execution_enabled": false
+```
 
 ### Configuration
 
@@ -360,45 +361,101 @@ suite. Only the live adapter and Phase 11 need the terminal.
 
 ---
 
-## 8. The control-identifier refusal
+## 8. The control identifiers, and why they are measured
 
-This is the one thing in the setup that no configuration fixes, so it gets its own
-section rather than a line in the troubleshooting list.
+To place an order, `auto-trade` drives the MetaTrader order dialog by clicking
+buttons. It therefore needs to *find* those buttons, and it does so by an identifier
+that belongs to one build of one terminal on one display.
 
-To place an order, \uto-trade\ drives the MetaTrader order dialog by clicking
-buttons. That means it needs the *screen coordinates* of those buttons. Screen
-coordinates are not a property of the software; they are a property of one
-installation, one display, one resolution, one window position and one build.
+That is not a stable name. MT5 adds and removes controls between builds, so an
+identifier measured on one build can address a different control, or nothing, on
+another. Upstream's own rule:
 
-So the identifiers are **measured**, not derived. \scripts/control_ids.py\ measures
-them by taking a screenshot of the real dialog and asking a human to confirm each
-point. It then records the terminal build it measured against.
+> Never substitute a control identifier you have not measured. A control found once
+> is a control whose behaviour is not established. If a build presents something
+> different, refuse and report it — do not wire it up.
 
-If the build changes, every measurement is void:
+So the bridge reads the terminal's build from two independent sources, requires them
+to agree, and refuses unless the build is the one the identifiers were measured on.
 
-\\powershell
+```powershell
 python scripts/control_ids.py
-\
-\REFUSED
-  build    6230 (ids measured on 6184)
-  The measured control identifiers belong to build 6184 and this terminal is
-  build 6230 -- a gap of 46 builds. Upstream's rule is explicit: never substitute
-  a control identifier you have not measured, and if a build presents something
-  different, refuse and report it.
-\
-That refusal is the system working. A build that silently accepted a stale
-identifier would be a system that clicks a position-size field and does not know
-it.
+```
 
-**To clear it**, a human re-measures on the current build, at the current display
-resolution, with the dialog open at the position it will be used from. It cannot be
-done from a script, and that is the point — the alternative is guessing where a
-button is before spending someone's money.
+```
+Known Issue 5 -- control identifiers and the terminal build
 
-Until then \uild_live()\ refuses, \check\ still runs the full pipeline in dry
-run, and nothing can be sent.
+  terminal64.exe FileVersion         6230
+  published position snapshot        6230
 
----
+  build confirmed as 6230 from 2 independent source(s)
+
+  OK -- the build matches.
+```
+
+**If the build changes, that command exits 1 and explains the gap.** That refusal is
+the system working: a build that silently accepted a stale identifier would be a
+system that clicks a position-size field and does not know it.
+
+### Re-measuring after an MT5 update
+
+The measurement is `auto-trade terminal-check`, which is upstream's own read-only
+probe. It opens the order dialog, reads the control tree, reports every expected
+identifier as OK / DRIFTED / MISSING, and closes the dialog again. Nothing is typed
+into it and no final control — Buy, Sell, OK, Close — is ever clicked.
+
+```powershell
+auto-trade terminal-check
+```
+
+```
+  "verdict": "OK",
+  "checked": 13,
+  "drifted": [],
+  "missing": [],
+```
+
+The report is written to `logs/terminal_check.json`, and `auto-trade
+terminal-check --compare` will later tell you whether a verdict ever changed, which
+is the question an update actually raises.
+
+**Only move the measured build if that report says OK for every control.** On this
+machine it did, on build 6230, which is why `control ids: ok` appears in §5:
+
+| control | measured | found |
+|---|---|---|
+| `symbol` | 10325 | 10325 |
+| `volume` | 10333 | 10333 |
+| `stop_loss` | 10334 | 10334 |
+| `take_profit` | 10336 | 10336 |
+| `final_control_buy` | 10408 | 10408 |
+| `final_control_sell` | 10409 | 10409 |
+| `trade_grid` | 10328 | 10328 |
+
+A **DRIFTED** or **MISSING** row means a control is no longer where it was measured,
+and the constant must not move. `tests/unit/test_control_id_evidence.py` enforces
+this: it fails if `MEASURED_ON_BUILD` names a build that no recorded probe reports,
+or if the latest recorded probe found anything drifted or missing. **The number
+cannot be edited without producing the evidence for it**, which is the difference
+between a measurement and a constant somebody changed to quiet a warning.
+
+### This gate is not the only thing between you and an order
+
+`control ids: ok` means the machine passed *one* gate. The default configuration
+still cannot trade, and cannot be made to by this section:
+
+| gate | default |
+|---|---|
+| control identifiers match the build | checked by `doctor` |
+| `BRIDGE_EXECUTION_ENABLED` | `false` |
+| `BRIDGE_DRY_RUN` | `true` |
+| the ledger is readable | checked when the live side is assembled |
+| the account is `DEMO` | checked when the live side is assembled |
+| the kill switch is clear | checked when the live side is assembled |
+
+And the one that is a code path rather than a setting: the default composition root,
+`build_bridge()`, returns `can_execute=False` with no executor attached. Reaching an
+order takes a deliberate `build_live()` call as well as the two variables.
 
 ## 9. Troubleshooting
 

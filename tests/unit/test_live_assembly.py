@@ -28,7 +28,12 @@ import pytest
 from signal_to_trade_bridge.composition import CompositionRefusal
 from signal_to_trade_bridge.configuration.config import BridgeConfig
 from signal_to_trade_bridge.domain.models import RiskParameters
-from signal_to_trade_bridge.live import BuildMismatch, build_live, check_control_ids
+from signal_to_trade_bridge.live import (
+    MEASURED_ON_BUILD,
+    BuildMismatch,
+    build_live,
+    check_control_ids,
+)
 
 # --- stubs -----------------------------------------------------------------
 
@@ -57,7 +62,19 @@ def _snapshot_folder(tmp_path: Path, build: int) -> Path:
     return tmp_path
 
 
-def _matching_build(tmp_path: Path, build: int = 6184) -> tuple[Path, Path]:
+def _matching_build(tmp_path: Path, build: int | None = None) -> tuple[Path, Path]:
+    """A terminal and a snapshot that agree on a build.
+
+    **Defaults to ``live.MEASURED_ON_BUILD`` rather than to a literal.** It was
+    hard-coded at 6184, which meant that when the re-measurement legitimately moved
+    the constant to 6230 every assembly test failed -- and the failure was reported
+    as ``BuildMismatch`` on a *fake* terminal, which reads like a real safety refusal
+    and is not one. A test double that tracks the thing it is standing in for does
+    not have to be edited every time the thing moves; a test double pinned to a
+    literal becomes a tripwire on an unrelated change.
+    """
+    if build is None:
+        build = MEASURED_ON_BUILD
     terminal = tmp_path / "terminal64.exe"
     _Executable(build).write(terminal)
     return terminal, _snapshot_folder(tmp_path / "data", build)
@@ -259,9 +276,17 @@ class TestTheRefusalsInOrder:
     def test_a_mismatched_build_is_refused_before_anything_else(
         self, tmp_path: Path, stub_execution: _StubBindings
     ) -> None:
+        # **Derived from the constant, not written as a literal.** It was `6230`,
+        # which was the mismatching build only while `MEASURED_ON_BUILD` was 6184 --
+        # so the re-measurement turned this test into a test of the *passing* path
+        # while it still claimed to test the refusal. `MEASURED_ON_BUILD + 46` is
+        # guaranteed to be a mismatch for as long as the constant exists, which is
+        # the point of the test: a refusal that can be satisfied by editing a number
+        # is not a refusal.
+        other = MEASURED_ON_BUILD + 46
         terminal = tmp_path / "terminal64.exe"
-        _Executable(6230).write(terminal)
-        data = _snapshot_folder(tmp_path / "data", 6230)
+        _Executable(other).write(terminal)
+        data = _snapshot_folder(tmp_path / "data", other)
 
         with pytest.raises(BuildMismatch):
             build_live(

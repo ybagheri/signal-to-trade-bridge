@@ -128,12 +128,19 @@ class TestTheControlIdRefusal:
     when someone had a trading terminal open would be a check that never ran.
     """
 
-    def test_this_machine_is_a_46_build_gap(self) -> None:
+    def test_the_re_measurement_reconciled_the_two_builds(self) -> None:
+        # **This machine used to be a 46-build gap, and no longer is.** The constant
+        # moved from 6184 to 6230 only after `auto-trade terminal-check` reported
+        # every control present, in place, on 6230 -- the evidence is in
+        # `logs/terminal_check.json`. So the assertion is that they now agree, and
+        # the refusal is tested separately below with a derived build rather than a
+        # literal, because a refusal test that hard-codes a number stops being a
+        # refusal test the moment somebody measures.
         check = check_control_ids(TERMINAL, DATA_PATH)
         assert check.build == 6230
-        assert check.expected == MEASURED_ON_BUILD == 6184
-        assert not check.matches
-        assert abs(check.build - check.expected) == 46
+        assert check.expected == MEASURED_ON_BUILD == 6230
+        assert check.matches is True
+        assert check.refusal() == ""
 
     def test_both_sources_agree_on_the_build(self) -> None:
         # Two sources, and they agreeing is what makes either worth believing.
@@ -141,26 +148,38 @@ class TestTheControlIdRefusal:
         assert check.agreed is True
         assert set(check.sources.values()) == {6230}
 
-    def test_a_mismatched_build_is_refused_with_an_actionable_message(self) -> None:
+    def test_a_mismatched_build_is_still_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The important half. Reconciling the real build must not have softened the
+        # gate, so the refusal is re-asserted against a *derived* wrong build: one
+        # that cannot accidentally become the right one.
+        monkeypatch.setattr("signal_to_trade_bridge.live.MEASURED_ON_BUILD", 99999)
         message = check_control_ids(TERMINAL, DATA_PATH).refusal()
-        assert "6184" in message
+        assert "99999" in message
         assert "6230" in message
         assert "re-measured" in message
 
-    def test_the_live_path_is_refused_on_this_build(self, tmp_path: Path) -> None:
-        # The end-to-end consequence, and the one that matters: with execution
-        # enabled and dry-run off, a bridge on this machine still refuses.
-        config = BridgeConfig(
-            risk=RiskParameters(allowed_symbols={"EURUSD"}),
-            execution_enabled=True,
-            dry_run=False,
-            log_directory=tmp_path,
-            mt5_terminal_path=TERMINAL,
-            mt5_data_path=DATA_PATH,
-        )
-        with pytest.raises(BuildMismatch) as raised:
-            build_live(config, terminal=TERMINAL, data_path=DATA_PATH)
-        assert "6230" in str(raised.value)
+    def test_the_live_path_assembles_now_but_still_cannot_trade(self, tmp_path: Path) -> None:
+        # The end-to-end consequence of the reconciliation, and the thing worth being
+        # careful about. Gate 1 no longer refuses on this machine, so assembly
+        # proceeds -- and what stops an order is now the *next* gate. This asserts
+        # the refusal moved rather than disappeared: with execution disabled, or
+        # dry-run on, or a non-demo account, `build_live` still says no.
+        for overrides in (
+            {"execution_enabled": False, "dry_run": False},
+            {"execution_enabled": True, "dry_run": True},
+        ):
+            config = BridgeConfig(
+                risk=RiskParameters(allowed_symbols={"EURUSD"}),
+                log_directory=tmp_path,
+                mt5_terminal_path=TERMINAL,
+                mt5_data_path=DATA_PATH,
+                **overrides,  # type: ignore[arg-type]
+            )
+            with pytest.raises(CompositionRefusal) as raised:
+                build_live(config, terminal=TERMINAL, data_path=DATA_PATH)
+            assert not isinstance(raised.value, BuildMismatch), (
+                f"{overrides} should be refused by a later gate, not by the build check"
+            )
 
     def test_the_build_mismatch_is_its_own_exception_type(self) -> None:
         # Because it is the one refusal that is about the *machine*. An operator
