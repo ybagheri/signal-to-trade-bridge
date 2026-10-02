@@ -293,7 +293,12 @@ def build_live(
 
     ledger = resolve_ledger(config, resolved)
     kill_switch, audit, workflow = _live_side(resolved, config, ledger)
-    return _finish(config, risk, account, symbols, ledger, resolved, kill_switch, audit, workflow)
+    # `live_bindings`, not `resolved`: the executor needs the **MT5** bindings to read
+    # the terminal's trading mode. `resolved` is the execution project's bindings, and
+    # they know nothing about the terminal.
+    return _finish(
+        config, risk, account, symbols, ledger, live_bindings, kill_switch, audit, workflow
+    )
 
 
 def _live_side(bindings: Any, config: BridgeConfig, ledger: Any) -> tuple[Any, Any, Any]:
@@ -380,7 +385,16 @@ def _finish(
     from signal_to_trade_bridge.application.process_signal import ProcessSignal
 
     pipeline = ProcessSignal(risk, config)
-    executor = AutoTradeExecutor(workflow, kill_switch=kill_switch)
+    # The MT5 bindings are injected so the executor can read the terminal's trading
+    # mode before it clicks anything. **This is load-bearing and it was missing for a
+    # whole phase**: without them the executor has no way to know the terminal is in
+    # One Click Trading mode, where an order's stop loss is not sent at all -- which
+    # is why the first real order filled at the panel's default volume with no stop
+    # while the dialog read back exactly what was requested.
+    #
+    # They are the same bindings the account and symbol providers were built from,
+    # so the mode is read from the terminal the order would actually go through.
+    executor = AutoTradeExecutor(workflow, bindings=bindings, kill_switch=kill_switch)
     pipeline.wire_execution(
         build_execution_envelope(executor=executor, idempotency=ledger, kill_switch=kill_switch)
     )

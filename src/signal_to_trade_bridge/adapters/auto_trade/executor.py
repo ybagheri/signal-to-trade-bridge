@@ -163,6 +163,25 @@ class AutoTradeExecutor:
                 error=str(exc),
             )
 
+        # **Refuse before the click, not after the fill.**
+        #
+        # On a terminal in One Click Trading mode the order ticket's fields are not
+        # what gets sent -- the Toolbox Trade panel's values are, and that panel has
+        # no stop loss. Every order this bridge placed before this check came back at
+        # the panel's default volume with no stop and no target, while the dialog read
+        # back exactly what was requested and `confirm_dialog_matches` passed.
+        #
+        # So the check is here, immediately before the workflow runs, where it can
+        # still stop a click rather than describe one that already happened. It reads
+        # the terminal's own state and changes nothing.
+        refusal = self._refuse_for_execution_mode(request)
+        if refusal:
+            return ExecutionResult(
+                signal_id=request.signal_id,
+                status=ExecutionResult.STATUS_REJECTED,
+                message=refusal,
+            )
+
         try:
             outcome = self._workflow.execute(signal)
         except Exception as exc:
@@ -181,6 +200,45 @@ class AutoTradeExecutor:
             )
 
         return self._to_result(request, outcome, bindings)
+
+    def _refuse_for_execution_mode(self, request: ExecutionRequest) -> str:
+        """Whether the terminal can carry this order's levels, or why it cannot.
+
+        Reads the terminal through the MT5 bindings this adapter already has, and
+        returns ``""`` when the order may go ahead.
+
+        **A terminal that cannot be read is treated as being in the mode that cannot
+        carry a stop.** The refusal costs one order on a machine whose bindings are
+        briefly unavailable; failing the other way opens an unprotected position.
+        """
+        from signal_to_trade_bridge.adapters.mt5.execution_mode import (
+            is_one_click_trading,
+            refuse_one_click_order,
+        )
+
+        source: Any = self._bindings
+        if source is None:
+            # Only the bindings *injected* into this adapter can answer the mode
+            # question, and only they are guaranteed to be what the order would go
+            # through. Reaching for the MT5 bindings here instead would make the
+            # check read a terminal the workflow may not even use -- and it would
+            # change the meaning of every test that wires an executor with no
+            # bindings, because those tests have no terminal and this would refuse
+            # them for one.
+            return ""
+        if not _looks_like_mt5_bindings(source):
+            # A stand-in, not the terminal. The order is going somewhere this check
+            # cannot inspect, and pretending otherwise would either refuse a test
+            # double or, worse, wave through a real order to an unknown destination.
+            return ""
+        try:
+            return refuse_one_click_order(request, one_click=is_one_click_trading(source))
+        except Exception:
+            return (
+                "the terminal's trading mode could not be read, so this order's stop "
+                "loss cannot be confirmed as one that would actually be sent. Refusing "
+                "rather than opening a position that may have no stop."
+            )
 
     def _to_signal(self, request: ExecutionRequest, bindings: AutoTradeBindings) -> Any:
         """The bridge's request as an upstream ``TradeSignal``.
@@ -283,6 +341,20 @@ _ORDER_ACTIONS: Mapping[Direction, str] = {
     Direction.LONG: "BUY",
     Direction.SHORT: "SELL",
 }
+
+
+def _looks_like_mt5_bindings(source: Any) -> bool:
+    """Whether *source* is the MT5 bindings surface, by the methods it must have.
+
+    **Duck-typed rather than isinstance, because the MT5 package is a Windows-only
+    wheel and may not be importable at all** -- and an adapter that cannot import the
+    thing it is checking against must not refuse to work. The test is the two calls
+    the check makes, so a double that implements them is treated as the real thing,
+    which is the correct behaviour for a test that is deliberately standing in for it.
+    """
+    return callable(getattr(source, "account_info", None)) and callable(
+        getattr(source, "terminal_info", None)
+    )
 
 
 def _order_action(direction: Direction) -> str:
