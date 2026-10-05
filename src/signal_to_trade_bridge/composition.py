@@ -113,13 +113,18 @@ def build_bridge(
     *,
     mt5_bindings: MT5Bindings | None = None,
     auto_trade_bindings: AutoTradeBindings | None = None,
+    ledger: Any | None = None,
 ) -> Bridge:
     """Assemble the bridge, or refuse.
 
-    Both binding sets are injectable so a test can drive the whole assembly with
-    no terminal and no private package. **A supplied set is not re-verified** --
-    ``load_bindings`` verifies on the real path, and a caller bringing its own is
-    trusted deliberately, so this stays a library function rather than a test hook.
+    Both binding sets and the idempotency ledger are injectable so a test can drive
+    the whole assembly with no terminal and no private package. **A supplied set or
+    ledger is not re-verified** -- ``load_bindings`` verifies on the real path, and a
+    caller bringing its own is trusted deliberately, so this stays a library function
+    rather than a test hook. A supplied ``ledger`` must satisfy
+    :class:`~signal_to_trade_bridge.ports.IdempotencyStore`; when omitted, the
+    execution project's own ledger is opened (or the assembly refuses), exactly as
+    before.
 
     :raises CompositionRefusal: on anything that would make the assembly unsafe.
     """
@@ -134,7 +139,8 @@ def build_bridge(
 
     # Opened before anything that writes, and refused rather than replaced: a ledger
     # that cannot be read must stop the process while there is still nothing to undo.
-    ledger = resolve_ledger(config, bindings)
+    if ledger is None:
+        ledger = resolve_ledger(config, bindings)
 
     pipeline = ProcessSignal(
         risk,

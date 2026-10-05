@@ -317,3 +317,35 @@ class StubMarketData:
         if self._error is not None:
             raise self._error
         return self._bars
+
+
+class InMemoryLedger:
+    """An :class:`~signal_to_trade_bridge.ports.IdempotencyStore` that keeps no file.
+
+    Lets a test build a real ``Bridge`` without the private execution project. It
+    mirrors the contract the real ledger is documented to have -- any record counts,
+    and a second attempt cannot take over the first one's record -- and nothing more.
+    It proves the *bridge* is wired correctly; it says nothing about upstream's
+    durability, which ``TestAgainstTheRealLedger`` covers where the package exists.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    def contains(self, key: str) -> bool:
+        return key in self._entries
+
+    def record_attempt(self, key: str, execution_id: str) -> None:
+        self._entries[key] = {"execution_id": execution_id, "status": "REQUESTED"}
+
+    def record_outcome(self, key: str, execution_id: str, outcome: Any) -> None:
+        entry = self._entries.get(key)
+        if entry is None or entry["execution_id"] != execution_id:
+            return
+        entry.update(dict(outcome))
+        entry["status"] = str(entry.get("status", "UNKNOWN"))
+
+    def pending(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {"key": k, **v} for k, v in self._entries.items() if v.get("status") == "REQUESTED"
+        )

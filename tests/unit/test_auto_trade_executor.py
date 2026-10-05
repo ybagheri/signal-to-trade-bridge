@@ -825,3 +825,80 @@ class TestTheRealPackageIfItIsInstalled:
     def test_the_real_bindings_surface_is_verified(self) -> None:
         bindings = self._bindings_or_skip()
         assert bindings.verify() is bindings
+
+
+# --- the One Click Trading guard ---------------------------------------------
+
+
+class _Terminal:
+    """The two terminal calls the trading-mode check reads."""
+
+    def __init__(self, *, trade_mode: int = 0, trade_allowed: bool = False) -> None:
+        self._trade_mode = trade_mode
+        self._trade_allowed = trade_allowed
+
+    def account_info(self) -> object:
+        return type("Account", (), {"trade_mode": self._trade_mode})()
+
+    def terminal_info(self) -> object:
+        return type("Info", (), {"trade_allowed": self._trade_allowed})()
+
+
+class _UnreadableTerminal:
+    def account_info(self) -> object:
+        raise RuntimeError("terminal not answering")
+
+    def terminal_info(self) -> object:
+        raise RuntimeError("terminal not answering")
+
+
+def _guarded(workflow: FakeWorkflow, terminal: object | None) -> AutoTradeExecutor:
+    return AutoTradeExecutor(
+        workflow,
+        bindings=_bindings(),
+        mt5_bindings=terminal,  # type: ignore[arg-type]
+        now=lambda: NOW,
+    )
+
+
+class TestTheOneClickGuard:
+    """Phase 15's finding, and the regression that left it inert.
+
+    The guard was written against the wrong object: it was handed the *execution
+    project's* bindings, found they did not look like a terminal, and skipped itself
+    -- on the live path too. These tests hand it a terminal through its own parameter
+    and assert the order is stopped *before* the workflow is reached.
+    """
+
+    def test_an_order_with_a_stop_is_refused_in_one_click_mode(self) -> None:
+        workflow = FakeWorkflow()
+        result = _guarded(workflow, _Terminal(trade_mode=0, trade_allowed=False)).submit(_request())
+        assert result.status == ExecutionResult.STATUS_REJECTED
+        assert "One Click Trading" in result.message
+        assert workflow.received == [], "the click must not be reached"
+
+    def test_an_order_goes_ahead_when_algo_trading_is_allowed(self) -> None:
+        workflow = FakeWorkflow()
+        _guarded(workflow, _Terminal(trade_mode=0, trade_allowed=True)).submit(_request())
+        assert len(workflow.received) == 1
+
+    def test_an_unreadable_terminal_is_treated_as_one_click_not_as_safe(self) -> None:
+        workflow = FakeWorkflow()
+        result = _guarded(workflow, _UnreadableTerminal()).submit(_request())
+        assert result.status == ExecutionResult.STATUS_REJECTED
+        assert workflow.received == []
+
+    def test_the_execution_projects_bindings_are_not_mistaken_for_a_terminal(self) -> None:
+        # The original defect, stated directly: supplying only the *execution
+        # project's* bindings must neither enable the guard nor be treated as a
+        # terminal. With no terminal supplied the mode is simply not checked.
+        workflow = FakeWorkflow()
+        _executor(workflow).submit(_request())
+        assert len(workflow.received) == 1
+
+    def test_the_two_binding_sets_are_separate_parameters(self) -> None:
+        import inspect
+
+        parameters = inspect.signature(AutoTradeExecutor.__init__).parameters
+        assert "bindings" in parameters
+        assert "mt5_bindings" in parameters

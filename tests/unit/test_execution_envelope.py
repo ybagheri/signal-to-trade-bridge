@@ -193,6 +193,7 @@ class TestTheLedgerRefusesRatherThanAnswers:
         with pytest.raises(AutoTradeUnavailable, match="could not be read"):
             AutoTradeLedger(Broken()).record_attempt(KEY, "exec-1")
 
+    @pytest.mark.requires_auto_trade
     def test_a_failed_outcome_write_refuses(self) -> None:
         class Broken:
             def record_result(self, _result: object) -> None:
@@ -201,6 +202,7 @@ class TestTheLedgerRefusesRatherThanAnswers:
         with pytest.raises(AutoTradeUnavailable, match="could not be read"):
             AutoTradeLedger(Broken()).record_outcome(KEY, "exec-1", {"status": "ACCEPTED"})
 
+    @pytest.mark.requires_auto_trade
     def test_optional_outcome_fields_are_normalised_not_passed_through(self) -> None:
         # `order_reference` and `error` are `str | None` upstream and both may
         # arrive as `""`. An empty string is not a position ticket, and storing it
@@ -219,6 +221,7 @@ class TestTheLedgerRefusesRatherThanAnswers:
         assert captured[1].order_reference == "382"
         assert captured[2].order_reference is None
 
+    @pytest.mark.requires_auto_trade
     def test_an_unrecognised_outcome_status_is_recorded_as_unknown(self) -> None:
         # Refusing would leave a pending entry an operator has to settle by hand --
         # safe, but a worse outcome than a record that says "we did not understand
@@ -245,9 +248,11 @@ class TestTheOperatorFacingSurface:
     narrow, and this does not become something a pipeline stage has to satisfy.
     """
 
+    @pytest.mark.requires_auto_trade
     def test_pending_is_empty_on_a_fresh_ledger(self) -> None:
         assert open_ledger(load_bindings(), _tmp()).pending() == ()
 
+    @pytest.mark.requires_auto_trade
     def test_pending_reports_an_attempt_that_never_settled(self) -> None:
         ledger = open_ledger(load_bindings(), _tmp())
         ledger.record_attempt(KEY, "exec-1")
@@ -256,6 +261,7 @@ class TestTheOperatorFacingSurface:
         assert pending[0]["signal_id"] == KEY
         assert pending[0]["status"] == "REQUESTED"
 
+    @pytest.mark.requires_auto_trade
     def test_pending_is_copied_so_a_caller_cannot_change_the_record(self) -> None:
         ledger = open_ledger(load_bindings(), _tmp())
         ledger.record_attempt(KEY, "exec-1")
@@ -263,6 +269,7 @@ class TestTheOperatorFacingSurface:
         entry["status"] = "ACCEPTED"
         assert ledger.pending()[0]["status"] == "REQUESTED"
 
+    @pytest.mark.requires_auto_trade
     def test_the_repr_shows_a_count_and_not_a_path(self) -> None:
         # The path can contain a username, and a repr ends up in tracebacks.
         path = _tmp() / "idempotency.json"

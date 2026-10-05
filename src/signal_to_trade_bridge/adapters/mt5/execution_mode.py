@@ -30,9 +30,24 @@ reading the right values off the wrong object.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
-__all__ = ["is_one_click_trading", "refuse_one_click_order"]
+__all__ = ["TradeModeSource", "is_one_click_trading", "refuse_one_click_order"]
+
+
+class TradeModeSource(Protocol):
+    """The two terminal calls the trading-mode check reads, and nothing else.
+
+    Deliberately **not** :class:`~signal_to_trade_bridge.adapters.mt5.bindings.MT5Bindings`:
+    that protocol is the four calls the account and symbol adapters make, and
+    ``terminal_info`` is not one of them. Widening it would force every double of the
+    terminal to grow a method it has no use for. The real ``MetaTrader5`` module
+    satisfies both protocols.
+    """
+
+    def account_info(self) -> Any: ...
+
+    def terminal_info(self) -> Any: ...
 
 
 def is_one_click_trading(bindings: Any) -> bool:
@@ -50,30 +65,12 @@ def is_one_click_trading(bindings: Any) -> bool:
     unresponsive; failing the other way costs money.
     """
     try:
-        account = bindings.account_info()
-    except Exception:
-        return True
-    if account is None:
-        return True
-
-    trade_mode = getattr(account, "trade_mode", None)
-    if isinstance(trade_mode, int) and trade_mode != 0:
-        return False
-
-    # `trade_mode == 0` is MT5's DISABLED, which is what this build reports when Algo
-    # Trading is off. Confirm it against the terminal's own view where that view is
-    # available: `trade_allowed` is the flag that actually decides whether the
-    # terminal may trade programmatically.
-    try:
         terminal = bindings.terminal_info()
     except Exception:
-        terminal = None
-    if terminal is not None:
-        allowed = getattr(terminal, "trade_allowed", None)
-        if allowed is True:
-            return False
-
-    return True
+        return True
+    if terminal is None:
+        return True
+    return getattr(terminal, "trade_allowed", None) is not True
 
 
 def refuse_one_click_order(request: Any, *, one_click: bool) -> str:
