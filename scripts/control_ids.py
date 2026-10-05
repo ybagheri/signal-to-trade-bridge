@@ -46,16 +46,20 @@ between a measurement and a number somebody edited to quiet a warning.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-#: The upstream checkout, where the measured identifiers live.
-UPSTREAM = Path(r"D:\Projects\auto-trade")
+#: The upstream checkout, where the measured identifiers live. Read from
+#: ``AUTO_TRADE_PATH``, the same variable ``scripts/setup.*`` uses.
+UPSTREAM = Path(os.getenv("AUTO_TRADE_PATH", ""))
 
-#: This machine's terminal. A parameter, not a constant, for the reason every path in
-#: this project is a parameter: no machine's path belongs in a repository.
-TERMINAL = Path(r"C:\Program Files\Alpari MT5_4\terminal64.exe")
+#: This machine's terminal and data folder. Parameters, not constants, for the reason
+#: every path in this project is a parameter: no machine's path (or user name) belongs
+#: in a repository. Read from the same variables the bridge itself uses.
+TERMINAL = Path(os.getenv("BRIDGE_MT5_TERMINAL_PATH", ""))
+DATA_PATH = Path(os.getenv("BRIDGE_MT5_DATA_PATH", ""))
 
 #: The build the measured identifiers belong to. **A different build is a refusal,
 #: not a warning** -- see the module docstring.
@@ -168,14 +172,22 @@ def measured_identifiers(upstream: Path) -> dict[str, int] | None:
 def main() -> int:
     print("Known Issue 5 -- control identifiers and the terminal build\n")
 
+    missing = [
+        name
+        for name, value in (
+            ("AUTO_TRADE_PATH", UPSTREAM),
+            ("BRIDGE_MT5_TERMINAL_PATH", TERMINAL),
+            ("BRIDGE_MT5_DATA_PATH", DATA_PATH),
+        )
+        if not str(value)
+    ]
+    if missing:
+        print(f"  NOT RUN: set {', '.join(missing)} (see .env.example).")
+        return 2
+
     builds = {
         "terminal64.exe FileVersion": terminal_build(TERMINAL),
-        "published position snapshot": snapshot_build(
-            Path(
-                r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal"
-                r"\1D9617E1A6A4352DBDC25D08FEC12BD2"
-            )
-        ),
+        "published position snapshot": snapshot_build(DATA_PATH),
     }
     for source, value in builds.items():
         print(f"  {source:34} {value if value is not None else 'unreadable'}")

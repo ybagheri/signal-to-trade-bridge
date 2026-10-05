@@ -646,7 +646,7 @@ inline and not covered by `terminal-check`.
 | Variable | Default |
 |---|---|
 | `AUTO_TRADE_TERMINAL_PATH` | `C:\Program Files\Alpari MT5_2\terminal64.exe` |
-| `AUTO_TRADE_DATA_PATH` | `C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\AF19E…` |
+| `AUTO_TRADE_DATA_PATH` | `C:\Users\YourUser\AppData\Roaming\MetaQuotes\Terminal\FEDCB…` |
 | `AUTO_TRADE_SIGNAL_DIR` | `signals` |
 | `AUTO_TRADE_LOG_DIR` | `logs` |
 | `AUTO_TRADE_ALLOWED_SYMBOLS` | `EURUSD,XAUUSD,YM` |

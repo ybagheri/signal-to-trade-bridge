@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from decimal import Decimal
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -257,7 +258,7 @@ class _StubAccountInfo:
         self.balance = 10000.0
         self.equity = 10000.0
         self.currency = "USD"
-        self.login = 53184454
+        self.login = 10000001
         self.name = "Alpari-MT5-Demo"
 
 
@@ -323,11 +324,49 @@ def bridge_factory(tmp_path: Path):
     on -- an open terminal -- and nothing else.
     """
     from signal_to_trade_bridge.composition import BridgeConfig, build_bridge
+    from stubs import InMemoryLedger
 
     def _factory(**overrides: object):
         from dataclasses import replace
 
         config = replace(BridgeConfig(), log_directory=tmp_path / "logs", **overrides)
-        return build_bridge(config, mt5_bindings=StubBindings())  # type: ignore[arg-type]
+        return build_bridge(
+            config,
+            mt5_bindings=StubBindings(),  # type: ignore[arg-type]
+            ledger=InMemoryLedger(),
+        )
 
     return _factory
+
+
+# --- optional upstreams ------------------------------------------------------
+
+#: Whether the private execution project is importable here. The suite is designed
+#: to run without it (see ``adapters/auto_trade/bindings.py``), so a test that does
+#: need the real package says so with ``@pytest.mark.requires_auto_trade`` and is
+#: *skipped with a reason* rather than failing for a cause unrelated to the code.
+HAS_AUTO_TRADE = find_spec("auto_trade") is not None
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if HAS_AUTO_TRADE:
+        return
+    skip = pytest.mark.skip(
+        reason="needs the private `auto_trade` package (AUTO_TRADE_PATH + scripts/setup)"
+    )
+    for item in items:
+        if "requires_auto_trade" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture
+def fake_terminal(tmp_path: Path) -> tuple[Path, Path]:
+    """A synthetic ``(terminal, data_path)`` pair whose build matches the measured one.
+
+    Replaces the old module constants that pointed at a real install on the author's
+    machine: those made every test using them fail elsewhere, and committed one
+    person's paths to the repository.
+    """
+    from terminal_fixtures import matching_build
+
+    return matching_build(tmp_path)

@@ -35,57 +35,64 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 #: this file, which is committed.
 RECORD = PROJECT_ROOT / "docs" / "measurements" / "control_ids.json"
 
-TERMINAL = Path(r"C:\Program Files\Alpari MT5_4\terminal64.exe")
-DATA = Path(
-    r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal"
-    r"\1D9617E1A6A4352DBDC25D08FEC12BD2"
-)
-
 
 class TestTheGateStillRefuses:
     """The half that must not have been softened by the reconciliation."""
 
-    def test_a_different_build_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_different_build_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, data = fake_terminal
         # A build nobody measured, on purpose.
         monkeypatch.setattr("signal_to_trade_bridge.live.MEASURED_ON_BUILD", 12345)
-        check = check_control_ids(TERMINAL, DATA)
+        check = check_control_ids(terminal, data)
         assert check.matches is False
         assert "12345" in check.refusal()
 
-    def test_the_expected_build_is_read_at_call_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_expected_build_is_read_at_call_time(
+        self, monkeypatch: pytest.MonkeyPatch, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, data = fake_terminal
         # `expected` used to be a default argument, which freezes the value when the
         # module is imported. So the constant and the check that guards it could
         # disagree with no way to notice except editing the constant -- which is
         # exactly what happened when the re-measurement moved it, and why the check
         # kept comparing against 6184 after the module said 6230.
         monkeypatch.setattr("signal_to_trade_bridge.live.MEASURED_ON_BUILD", 999)
-        assert check_control_ids(TERMINAL, DATA).expected == 999
+        assert check_control_ids(terminal, data).expected == 999
         monkeypatch.setattr("signal_to_trade_bridge.live.MEASURED_ON_BUILD", 998)
-        assert check_control_ids(TERMINAL, DATA).expected == 998
+        assert check_control_ids(terminal, data).expected == 998
 
-    def test_an_explicit_expected_still_wins(self) -> None:
-        check = check_control_ids(TERMINAL, DATA, expected=4242)
+    def test_an_explicit_expected_still_wins(self, fake_terminal: tuple[Path, Path]) -> None:
+        terminal, data = fake_terminal
+        check = check_control_ids(terminal, data, expected=4242)
         assert check.expected == 4242
         assert check.matches is False
 
 
 class TestTheGatePassesOnAMeasuredBuild:
-    def test_the_build_agrees_and_there_is_no_refusal_text(self) -> None:
+    def test_the_build_agrees_and_there_is_no_refusal_text(
+        self, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, data = fake_terminal
         # **Both halves.** `matches` going True is the reconciliation; `refusal()`
         # being empty is the bug fix. It used to return the full "a gap of 0 builds"
         # paragraph, because it branched on whether the sources were readable and
         # never asked whether the builds agreed -- and `doctor` reads `matches` for
         # its verdict and `refusal()` for the text underneath, so it would have
         # printed **ok** directly above a refusal.
-        check = check_control_ids(TERMINAL, DATA)
+        check = check_control_ids(terminal, data)
         assert check.build == MEASURED_ON_BUILD
         assert check.matches is True
         assert check.refusal() == ""
 
-    def test_a_matching_check_with_unreadable_sources_is_still_refused(self) -> None:
+    def test_a_matching_check_with_unreadable_sources_is_still_refused(
+        self, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, _data = fake_terminal
         # `matches` requires agreement, so "one source said so" is not a pass even
         # when the one source that spoke happens to be right.
-        check = check_control_ids(TERMINAL, Path("no-such-folder"))
+        check = check_control_ids(terminal, Path("no-such-folder"))
         assert check.agreed is False
         assert check.matches is False
         assert check.refusal() != ""
@@ -137,6 +144,7 @@ class TestTheMeasurementIsBackedByEvidence:
             assert control in seen, f"the record does not cover {control}"
             assert seen[control]["status"] == "OK", f"{control}: {seen[control]['status']}"
 
+    @pytest.mark.requires_auto_trade
     def test_the_recorded_identifiers_are_the_ones_upstream_uses(self) -> None:
         # **The record is checked against upstream's source, not trusted.** A
         # committed JSON file that drifts from the code it documents is worse than
@@ -186,8 +194,13 @@ class TestWhatStopsAnOrderNow:
         ],
     )
     def test_the_default_configuration_is_still_refused(
-        self, tmp_path: Path, flags: dict[str, bool], fragment: str
+        self,
+        tmp_path: Path,
+        fake_terminal: tuple[Path, Path],
+        flags: dict[str, bool],
+        fragment: str,
     ) -> None:
+        terminal, data = fake_terminal
         from signal_to_trade_bridge.composition import CompositionRefusal
         from signal_to_trade_bridge.configuration.config import BridgeConfig
         from signal_to_trade_bridge.domain.models import RiskParameters
@@ -196,22 +209,33 @@ class TestWhatStopsAnOrderNow:
         config = BridgeConfig(
             risk=RiskParameters(allowed_symbols={"EURUSD"}),
             log_directory=tmp_path,
-            mt5_terminal_path=TERMINAL,
-            mt5_data_path=DATA,
+            mt5_terminal_path=terminal,
+            mt5_data_path=data,
             **flags,  # type: ignore[arg-type]
         )
         with pytest.raises(CompositionRefusal) as raised:
-            build_live(config, terminal=TERMINAL, data_path=DATA)
+            build_live(config, terminal=terminal, data_path=data)
         assert fragment in str(raised.value)
 
-    def test_the_default_composition_root_cannot_execute(self) -> None:
+    def test_the_default_composition_root_cannot_execute(
+        self, fake_terminal: tuple[Path, Path], tmp_path: Path
+    ) -> None:
         # The rung that is a *code path* rather than a setting, and therefore the one
         # no environment variable can reach. `build_bridge` is what the CLI and every
         # library consumer get.
+        from conftest import StubBindings
         from signal_to_trade_bridge.composition import build_bridge
         from signal_to_trade_bridge.configuration.config import BridgeConfig
+        from stubs import InMemoryLedger
 
-        bridge = build_bridge(BridgeConfig(mt5_terminal_path=TERMINAL, mt5_data_path=DATA))
+        terminal, data = fake_terminal
+        bridge = build_bridge(
+            BridgeConfig(
+                mt5_terminal_path=terminal, mt5_data_path=data, log_directory=tmp_path / "logs"
+            ),
+            mt5_bindings=StubBindings(),  # type: ignore[arg-type]
+            ledger=InMemoryLedger(),
+        )
         assert getattr(bridge, "can_execute", None) is False
 
 

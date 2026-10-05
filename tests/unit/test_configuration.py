@@ -57,7 +57,7 @@ class TestDefaults:
 
     def test_no_machine_specific_path_is_baked_in(self, clean_environment: None) -> None:
         # The current development machine happens to use E:\, and the execution
-        # project defaults to another person's C:\Users\BazikadeStore. A default
+        # project defaults to another person's C:\Users\YourUser. A default
         # that names any of those is a default that is wrong on every other
         # laptop.
         #

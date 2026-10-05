@@ -29,7 +29,7 @@ reasons, and the third is the one that matters:
 ### The account must be a demo one
 
 Every test that reads an account asserts `DEMO` before it proceeds. A demo account
-on this machine is `53184454` on `Alpari-MT5-Demo`, confirmed from the terminal's
+on this machine is `10000001` on `Alpari-MT5-Demo`, confirmed from the terminal's
 own title bar. If the terminal is logged into anything else the tests stop, because
 a test that reads a live account's balance is not a test.
 """
@@ -65,41 +65,39 @@ from signal_to_trade_bridge.live import (
 
 pytestmark = pytest.mark.mt5
 
-#: This machine's terminal and data folder. **Parameters, never constants in the
-#: package** -- the values live in the test, and the package is given them.
-TERMINAL = Path(r"C:\Program Files\Alpari MT5_4\terminal64.exe")
-DATA_PATH = Path(
-    r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal"
-    r"\1D9617E1A6A4352DBDC25D08FEC12BD2"
+#: The terminal and data folder of the machine running the live tests, read from the
+#: environment and **never committed**. An earlier revision hard-coded one person's
+#: install path, Windows profile name, demo login and account-holder name here: that
+#: made the file fail on every other machine and put personal account details into the
+#: repository. See ``.env.example`` (the ``BRIDGE_TEST_*`` block) for the variables.
+#:
+#: Parameters, never constants in the package -- the values live in the environment,
+#: and the package is given them.
+TERMINAL = Path(os.getenv("BRIDGE_TEST_TERMINAL", "") or "terminal64.exe")
+DATA_PATH = Path(os.getenv("BRIDGE_TEST_DATA_PATH", "") or "terminal-data")
+
+#: The demo account the terminal is logged into, asserted rather than trusted, so a
+#: test cannot read a live account by accident. ``0`` / ``""`` mean "not configured".
+DEMO_LOGIN = int(os.getenv("BRIDGE_TEST_DEMO_LOGIN", "0") or 0)
+
+#: What ``account_info().name`` is for that account. Phase 11 found, by reading a live
+#: account, that this is the account holder's *display name* and not the server name:
+#: the server is only visible in the terminal's title bar. So a log line reading
+#: ``server=<holder name>`` is correct and not a bug in the mapping. Recorded so nobody
+#: later "fixes" the adapter to put a server name in a field the terminal fills with an
+#: account name.
+DEMO_ACCOUNT_NAME = os.getenv("BRIDGE_TEST_DEMO_ACCOUNT_NAME", "")
+
+#: The server, only observable from the window title; nothing in the Python bindings
+#: exposes it, and the bridge does not need it (demo/live comes from the account type).
+DEMO_SERVER = os.getenv("BRIDGE_TEST_DEMO_SERVER", "")
+
+#: Whether a real terminal was configured *and* is present on disk.
+HAS_REAL_TERMINAL = bool(os.getenv("BRIDGE_TEST_TERMINAL")) and TERMINAL.exists()
+needs_real_terminal = pytest.mark.skipif(
+    not HAS_REAL_TERMINAL,
+    reason="set BRIDGE_TEST_TERMINAL / BRIDGE_TEST_DATA_PATH to a real terminal install",
 )
-
-#: The demo account this machine is logged into, read from the terminal's own title
-#: bar rather than assumed. Asserted below, not trusted.
-DEMO_LOGIN = 53184454
-
-#: **What `account_info().name` actually is on this machine: the account's display
-#: name, not the server name.** Phase 11 found this by reading a live account rather
-#: than by reading documentation:
-#:
-#: ```
-#: terminal title bar   53184454 - Alpari-MT5-Demo: Demo Account - Hedge - Alpari - [USDInd,H1]
-#: account_info().login  53184454
-#: account_info().name   "YouJos Hundred"        <- the account holder's name
-#: ```
-#:
-#: So the server is in the *title bar* and the name field is not it. Asserting
-#: `name == "Alpari-MT5-Demo"` would have failed here, and the bridge reads
-#: ``AccountBalance.server`` from that field -- so a log line reading
-#: ``server=YouJos Hundred`` is **correct** and not a bug in the mapping.
-#: Recorded here so nobody later "fixes" the adapter to put a server name in a field
-#: the terminal fills with an account name.
-DEMO_ACCOUNT_NAME = "YouJos Hundred"
-
-#: The server, which is only observable from the window title. Kept as a literal
-#: rather than a constant the code reads, because nothing in the Python bindings
-#: exposes it -- and the bridge does not need it, since the demo/live distinction
-#: comes from the account type.
-DEMO_SERVER = "Alpari-MT5-Demo"
 
 LIVE = os.getenv("BRIDGE_ALLOW_MT5_TESTS") == "1"
 
@@ -107,6 +105,11 @@ LIVE = os.getenv("BRIDGE_ALLOW_MT5_TESTS") == "1"
 def _skip_without_optin() -> None:
     if not LIVE:
         pytest.skip("set BRIDGE_ALLOW_MT5_TESTS=1 to run the live MT5 tests")
+    if not (HAS_REAL_TERMINAL and DEMO_LOGIN and DEMO_ACCOUNT_NAME):
+        pytest.skip(
+            "set BRIDGE_TEST_TERMINAL, BRIDGE_TEST_DATA_PATH, BRIDGE_TEST_DEMO_LOGIN and "
+            "BRIDGE_TEST_DEMO_ACCOUNT_NAME (see .env.example) for the live MT5 tests"
+        )
 
 
 def _skip_without_package() -> None:
@@ -128,6 +131,7 @@ class TestTheControlIdRefusal:
     when someone had a trading terminal open would be a check that never ran.
     """
 
+    @needs_real_terminal
     def test_the_re_measurement_reconciled_the_two_builds(self) -> None:
         # **This machine used to be a 46-build gap, and no longer is.** The constant
         # moved from 6184 to 6230 only after `auto-trade terminal-check` reported
@@ -142,23 +146,30 @@ class TestTheControlIdRefusal:
         assert check.matches is True
         assert check.refusal() == ""
 
+    @needs_real_terminal
     def test_both_sources_agree_on_the_build(self) -> None:
         # Two sources, and they agreeing is what makes either worth believing.
         check = check_control_ids(TERMINAL, DATA_PATH)
         assert check.agreed is True
         assert set(check.sources.values()) == {6230}
 
-    def test_a_mismatched_build_is_still_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_mismatched_build_is_still_refused(
+        self, monkeypatch: pytest.MonkeyPatch, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, data = fake_terminal
         # The important half. Reconciling the real build must not have softened the
         # gate, so the refusal is re-asserted against a *derived* wrong build: one
         # that cannot accidentally become the right one.
         monkeypatch.setattr("signal_to_trade_bridge.live.MEASURED_ON_BUILD", 99999)
-        message = check_control_ids(TERMINAL, DATA_PATH).refusal()
+        message = check_control_ids(terminal, data).refusal()
         assert "99999" in message
         assert "6230" in message
         assert "re-measured" in message
 
-    def test_the_live_path_assembles_now_but_still_cannot_trade(self, tmp_path: Path) -> None:
+    def test_the_live_path_assembles_now_but_still_cannot_trade(
+        self, tmp_path: Path, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, data = fake_terminal
         # The end-to-end consequence of the reconciliation, and the thing worth being
         # careful about. Gate 1 no longer refuses on this machine, so assembly
         # proceeds -- and what stops an order is now the *next* gate. This asserts
@@ -171,12 +182,12 @@ class TestTheControlIdRefusal:
             config = BridgeConfig(
                 risk=RiskParameters(allowed_symbols={"EURUSD"}),
                 log_directory=tmp_path,
-                mt5_terminal_path=TERMINAL,
-                mt5_data_path=DATA_PATH,
+                mt5_terminal_path=terminal,
+                mt5_data_path=data,
                 **overrides,  # type: ignore[arg-type]
             )
             with pytest.raises(CompositionRefusal) as raised:
-                build_live(config, terminal=TERMINAL, data_path=DATA_PATH)
+                build_live(config, terminal=terminal, data_path=data)
             assert not isinstance(raised.value, BuildMismatch), (
                 f"{overrides} should be refused by a later gate, not by the build check"
             )
@@ -187,21 +198,27 @@ class TestTheControlIdRefusal:
         assert issubclass(BuildMismatch, CompositionRefusal)
         assert not issubclass(CompositionRefusal, BuildMismatch)
 
-    def test_a_missing_source_is_a_refusal_not_a_pass(self, tmp_path: Path) -> None:
+    def test_a_missing_source_is_a_refusal_not_a_pass(
+        self, tmp_path: Path, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, _data = fake_terminal
         # "One source said so" is not agreement. With the snapshot folder absent the
         # check must not quietly decide it has no objection.
-        check = check_control_ids(TERMINAL, tmp_path / "no-such-folder")
+        check = check_control_ids(terminal, tmp_path / "no-such-folder")
         assert check.agreed is False
         assert not check.matches
         assert "disagree" in check.refusal() or "could not be read" in check.refusal()
 
-    def test_an_unreadable_executable_is_a_refusal_not_a_pass(self, tmp_path: Path) -> None:
+    def test_an_unreadable_executable_is_a_refusal_not_a_pass(
+        self, tmp_path: Path, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        _terminal, data = fake_terminal
         # An executable that is not there leaves the snapshot as the only source, and
         # one source is not agreement -- so the message is about the *disagreement*,
         # not about the file being unreadable. Worth asserting exactly: a message
         # saying "could not be read" here would point an operator at a file that read
         # perfectly well.
-        check = check_control_ids(tmp_path / "not-a-terminal.exe", DATA_PATH)
+        check = check_control_ids(tmp_path / "not-a-terminal.exe", data)
         assert check.agreed is False
         assert not check.matches
         assert "disagree" in check.refusal()
@@ -213,7 +230,10 @@ class TestTheControlIdRefusal:
         assert not check.agreed
         assert "could not be read" in check.refusal()
 
-    def test_a_source_that_disagrees_is_refused(self, tmp_path: Path) -> None:
+    def test_a_source_that_disagrees_is_refused(
+        self, tmp_path: Path, fake_terminal: tuple[Path, Path]
+    ) -> None:
+        terminal, _data = fake_terminal
         # A terminal updated while running is a real state, and it is the reason two
         # sources are compared rather than one being preferred.
         files = tmp_path / "MQL5" / "Files"
@@ -221,7 +241,7 @@ class TestTheControlIdRefusal:
         (files / "auto_trade_positions_a.json").write_text(
             json.dumps({"schema": 1, "terminal_build": 6184}), encoding="utf-8"
         )
-        check = check_control_ids(TERMINAL, tmp_path)
+        check = check_control_ids(terminal, tmp_path)
         assert check.agreed is False
         assert "disagree" in check.refusal()
 
@@ -310,7 +330,7 @@ class TestAgainstTheRunningTerminal:
         # `AccountBalance.server`. It is **not** the server: the terminal fills it with
         # the account holder's display name, and the server is only in the title bar.
         #
-        # So `server=YouJos Hundred` in a log is the adapter reporting faithfully, and
+        # So `server=Example Account Holder` in a log is the adapter reporting faithfully, and
         # renaming the field would be the bug rather than the fix.
         info = mt5.account_info()  # type: ignore[attr-defined]
         assert info.name == DEMO_ACCOUNT_NAME

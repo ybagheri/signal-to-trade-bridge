@@ -78,6 +78,7 @@ from signal_to_trade_bridge.domain.enums import Direction
 from signal_to_trade_bridge.domain.models import ExecutionRequest, ExecutionResult
 
 if TYPE_CHECKING:
+    from signal_to_trade_bridge.adapters.mt5.execution_mode import TradeModeSource
     from signal_to_trade_bridge.ports import KillSwitch
 
 __all__ = ["SENTINEL_PROFILE", "AutoTradeExecutor"]
@@ -104,6 +105,7 @@ class AutoTradeExecutor:
         workflow: Any,
         *,
         bindings: AutoTradeBindings | None = None,
+        mt5_bindings: TradeModeSource | None = None,
         kill_switch: KillSwitch | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -115,6 +117,14 @@ class AutoTradeExecutor:
             one.
         :param bindings: the upstream subset, injectable so the mapping can be
             tested against doubles without the package installed.
+        :param mt5_bindings: the **MetaTrader 5** bindings, used only to read the
+            terminal's trading mode before clicking. A separate parameter from
+            ``bindings`` because they are different packages: ``bindings`` is the
+            execution project's namespace and knows nothing about the terminal.
+            Conflating the two is what left the One Click Trading guard inert for a
+            whole phase -- it was handed the wrong object, found it did not look like
+            a terminal, and quietly skipped itself. ``None`` means the mode cannot be
+            checked and the order goes ahead; ``live.build_live`` always supplies it.
         :param kill_switch: the bridge's own
             :class:`~signal_to_trade_bridge.ports.KillSwitch`. Checked **before**
             delegating, so an engaged switch stops the call rather than becoming
@@ -125,6 +135,7 @@ class AutoTradeExecutor:
         """
         self._workflow = workflow
         self._bindings = bindings
+        self._mt5_bindings = mt5_bindings
         self._kill_switch = kill_switch
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -216,20 +227,12 @@ class AutoTradeExecutor:
             refuse_one_click_order,
         )
 
-        source: Any = self._bindings
+        source = self._mt5_bindings
         if source is None:
-            # Only the bindings *injected* into this adapter can answer the mode
-            # question, and only they are guaranteed to be what the order would go
-            # through. Reaching for the MT5 bindings here instead would make the
-            # check read a terminal the workflow may not even use -- and it would
-            # change the meaning of every test that wires an executor with no
-            # bindings, because those tests have no terminal and this would refuse
-            # them for one.
-            return ""
-        if not _looks_like_mt5_bindings(source):
-            # A stand-in, not the terminal. The order is going somewhere this check
-            # cannot inspect, and pretending otherwise would either refuse a test
-            # double or, worse, wave through a real order to an unknown destination.
+            # No terminal was supplied, so there is nothing to read the mode from.
+            # This is the state of every test that wires an executor by hand, and it
+            # is **not** the live state: `build_live` always passes the terminal's
+            # bindings, and `test_live_assembly` asserts it does.
             return ""
         try:
             return refuse_one_click_order(request, one_click=is_one_click_trading(source))
@@ -341,20 +344,6 @@ _ORDER_ACTIONS: Mapping[Direction, str] = {
     Direction.LONG: "BUY",
     Direction.SHORT: "SELL",
 }
-
-
-def _looks_like_mt5_bindings(source: Any) -> bool:
-    """Whether *source* is the MT5 bindings surface, by the methods it must have.
-
-    **Duck-typed rather than isinstance, because the MT5 package is a Windows-only
-    wheel and may not be importable at all** -- and an adapter that cannot import the
-    thing it is checking against must not refuse to work. The test is the two calls
-    the check makes, so a double that implements them is treated as the real thing,
-    which is the correct behaviour for a test that is deliberately standing in for it.
-    """
-    return callable(getattr(source, "account_info", None)) and callable(
-        getattr(source, "terminal_info", None)
-    )
 
 
 def _order_action(direction: Direction) -> str:

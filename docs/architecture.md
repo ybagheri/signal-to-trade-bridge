@@ -693,7 +693,7 @@ terminal_path = Path(
 data_path = Path(
     os.getenv(
         "AUTO_TRADE_DATA_PATH",
-        r"C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\AF19ECCF568F855DF9D3196BBF8BF315",
+        r"C:\Users\YourUser\AppData\Roaming\MetaQuotes\Terminal\FEDCBA9876543210FEDCBA9876543210",
     )
 )
 ```
@@ -1232,9 +1232,9 @@ Recorded because both are the kind of fact a project argues about from memory an
 gets wrong:
 
 * **`account_info().name` is the account holder's display name, not the server.** The
-  terminal's title bar carries the server (`53184454 - Alpari-MT5-Demo: ...`);
-  `name` carries `"YouJos Hundred"`. The bridge maps that field to
-  `AccountBalance.server``, so a log line reading `server=YouJos Hundred` is the
+  terminal's title bar carries the server (`10000001 - Alpari-MT5-Demo: ...`);
+  `name` carries `"Example Account Holder"`. The bridge maps that field to
+  `AccountBalance.server``, so a log line reading `server=Example Account Holder` is the
   adapter reporting faithfully. The field name belongs to the terminal.
 * **the index symbol is `USDInd`, not `USDIndex`.** Confirmed by asking: one returns a
   specification, the other returns nothing. A symbol list written from intuition would
@@ -1381,7 +1381,7 @@ Recorded honestly rather than guessed:
   stands alone. Both are defensible; the decision depends on whether
   `albrooks` would accept a new public surface, which is the maintainer's call.
 * Whether live MT5 validation runs against Alpari demo
-  (`C:\Users\bagheri\AppData\Roaming\Alpari MT5\terminal64.exe`, data folder
+  (`C:\Users\<you>\AppData\Roaming\Alpari MT5\terminal64.exe`, data folder
   `…\MetaQuotes\Terminal\1BFBA8D123B04AAD5E48746348E9B594`). Not touched in
   Phase 0. `auto-trade`'s own control ids were measured on **Alpari build 6184**,
   so a build mismatch is a live risk for Phase 11.

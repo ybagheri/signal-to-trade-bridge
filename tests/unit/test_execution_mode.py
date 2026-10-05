@@ -3,8 +3,8 @@
 **This is the mechanism behind every bad fill this project has produced**, and it was
 not a write race, not a focus problem, and not a bug in the field writes.
 
-The terminal was in **One Click Trading** mode -- Alpari's default when Algo Trading
-is off, which is what `trade_mode=0` and `trade_allowed=False` mean. In that mode
+The terminal was in **One Click Trading** mode -- what this broker's build
+falls back to when Algo Trading is off, which is what `trade_allowed=False` means. In that mode
 `Buy by Market` does not send the order ticket's fields. It sends the Toolbox **Trade
 panel's**: a symbol, a volume spinner, and no stop loss or take profit at all.
 
@@ -46,7 +46,7 @@ from signal_to_trade_bridge.domain.models import (
     TradeIntent,
 )
 
-TERMINAL_PATH = r"C:\Program Files\Alpari MT5_4\terminal64.exe"
+TERMINAL_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 
 
 class _TerminalInfo:
@@ -85,17 +85,24 @@ def _is_one_click(bindings: _Bindings) -> bool:
 
 
 class TestReadingTheMode:
-    def test_algo_trading_off_reads_as_one_click(self) -> None:
-        # `trade_mode=0` is MT5's DISABLED. On this build that is the state that
-        # makes the terminal fall back to the Trade panel.
-        assert _is_one_click(_Bindings(trade_mode=0, trade_allowed=False)) is True
+    @pytest.mark.parametrize("trade_mode", [0, 1, 2])
+    def test_algo_trading_off_reads_as_one_click(self, trade_mode: int) -> None:
+        # `trade_allowed` is the whole signal. `trade_mode` is the *account type*
+        # (0 DEMO, 1 CONTEST, 2 REAL) and must not change the answer in either
+        # direction -- an earlier revision read 0 as "disabled" and so treated every
+        # demo account as one-click, and every real one as fine.
+        assert _is_one_click(_Bindings(trade_mode=trade_mode, trade_allowed=False)) is True
 
-    @pytest.mark.parametrize(
-        ("trade_mode", "trade_allowed"),
-        [(1, True), (3, True), (3, False)],
-    )
-    def test_algo_trading_on_is_not_one_click(self, trade_mode: int, trade_allowed: bool) -> None:
-        assert _is_one_click(_Bindings(trade_mode=trade_mode, trade_allowed=trade_allowed)) is False
+    @pytest.mark.parametrize("trade_mode", [0, 1, 2])
+    def test_algo_trading_on_is_not_one_click(self, trade_mode: int) -> None:
+        assert _is_one_click(_Bindings(trade_mode=trade_mode, trade_allowed=True)) is False
+
+    def test_a_flag_that_is_not_a_real_true_is_not_trusted(self) -> None:
+        class _Odd(_Bindings):
+            def terminal_info(self) -> object:
+                return type("Info", (), {"trade_allowed": 1})()
+
+        assert _is_one_click(_Odd(trade_mode=0, trade_allowed=True)) is True
 
     def test_an_unreadable_terminal_is_not_assumed_to_be_safe(self) -> None:
         # The dangerous direction. A terminal whose mode cannot be read might be in

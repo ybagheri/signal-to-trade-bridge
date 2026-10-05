@@ -97,6 +97,7 @@ markers = [
     "mt5: requires a running MetaTrader 5 terminal. Skipped unless BRIDGE_ALLOW_MT5_TESTS=1.",
     "integration: exercises adapters across module boundaries without a live terminal.",
     "e2e: end-to-end flow from a signal through to an execution result.",
+    "requires_auto_trade: needs the private auto_trade package. Skipped with a reason when it is not importable.",
 ]
 
 [tool.ruff]

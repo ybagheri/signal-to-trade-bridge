@@ -11,10 +11,14 @@ They **do not** prove the assembly works against a real terminal, because that n
 re-measured identifiers and a human watching. That gap is the whole of what Phase 11
 could not close, and it is recorded in `HANDOFF.md` rather than smoothed over here.
 
-Every test uses a stub terminal and a stub execution project, so none of them needs
-`MetaTrader5`, a running terminal, or the private package installed. Where a stub
-cannot stand in -- the real `FileKillSwitch`, the real `AuditLogger` -- the test says
-so rather than pretending.
+Every test uses a stub terminal, so none of them needs `MetaTrader5` or a running
+terminal. **They do need the private `auto_trade` package importable**: the stub
+execution project is installed by patching `auto_trade.*` dotted paths, and
+`BridgeConfig.terminal_profile` builds the real `TerminalProfile`. So the whole
+module is marked `requires_auto_trade` and is skipped, with a reason, where the
+package is absent (this docstring used to claim otherwise). Where a stub cannot
+stand in -- the real `FileKillSwitch`, the real `AuditLogger` -- the test says so
+rather than pretending.
 """
 
 from __future__ import annotations
@@ -34,50 +38,13 @@ from signal_to_trade_bridge.live import (
     build_live,
     check_control_ids,
 )
+from terminal_fixtures import Executable as _Executable
+from terminal_fixtures import matching_build as _matching_build
+from terminal_fixtures import snapshot_folder as _snapshot_folder
+
+pytestmark = pytest.mark.requires_auto_trade
 
 # --- stubs -----------------------------------------------------------------
-
-
-class _Executable:
-    """A file whose bytes contain a version block, so the build reads as expected.
-
-    A real PE would be a large binary fixture for one string. What the reader needs
-    is the *shape* of the version block, and this is that shape -- stated here because
-    a test that fakes a file format is only honest about the format it fakes.
-    """
-
-    def __init__(self, build: int) -> None:
-        self.build = build
-
-    def write(self, path: Path) -> None:
-        path.write_bytes(("x" * 64 + f"5.0.0.{self.build}" + "y" * 64).encode("utf-16-le"))
-
-
-def _snapshot_folder(tmp_path: Path, build: int) -> Path:
-    files = tmp_path / "MQL5" / "Files"
-    files.mkdir(parents=True)
-    (files / "auto_trade_positions_a.json").write_text(
-        f'{{"schema": 1, "terminal_build": {build}}}', encoding="utf-8"
-    )
-    return tmp_path
-
-
-def _matching_build(tmp_path: Path, build: int | None = None) -> tuple[Path, Path]:
-    """A terminal and a snapshot that agree on a build.
-
-    **Defaults to ``live.MEASURED_ON_BUILD`` rather than to a literal.** It was
-    hard-coded at 6184, which meant that when the re-measurement legitimately moved
-    the constant to 6230 every assembly test failed -- and the failure was reported
-    as ``BuildMismatch`` on a *fake* terminal, which reads like a real safety refusal
-    and is not one. A test double that tracks the thing it is standing in for does
-    not have to be edited every time the thing moves; a test double pinned to a
-    literal becomes a tripwire on an unrelated change.
-    """
-    if build is None:
-        build = MEASURED_ON_BUILD
-    terminal = tmp_path / "terminal64.exe"
-    _Executable(build).write(terminal)
-    return terminal, _snapshot_folder(tmp_path / "data", build)
 
 
 def _config(tmp_path: Path, **overrides: Any) -> BridgeConfig:
@@ -114,8 +81,8 @@ class _StubAccountInfo:
     balance: float = 10000.0
     equity: float = 10000.0
     currency: str = "USD"
-    login: int = 53184454
-    name: str = "YouJos Hundred"
+    login: int = 10000001
+    name: str = "Example Account Holder"
 
 
 class _StubMt5Bindings:

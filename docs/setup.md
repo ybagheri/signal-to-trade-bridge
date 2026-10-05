@@ -233,8 +233,8 @@ template would be a number nobody computed.
 install. Set the two paths in `.env`:
 
 ```dotenv
-BRIDGE_MT5_TERMINAL_PATH=C:\Program Files\Alpari MT5_4\terminal64.exe
-BRIDGE_MT5_DATA_PATH=C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352DBDC25D08FEC12BD2
+BRIDGE_MT5_TERMINAL_PATH=C:\Program Files\<Broker> MT5\terminal64.exe
+BRIDGE_MT5_DATA_PATH=C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\0123456789ABCDEF0123456789ABCDEF
 ```
 
 `BRIDGE_MT5_DATA_PATH` is the terminal's data directory, not its install directory.
@@ -254,8 +254,8 @@ signal-to-trade-bridge
 
   MetaTrader5        ok
   auto_trade         ok
-  terminal           C:\Program Files\Alpari MT5_4\terminal64.exe
-  data directory     C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352D...
+  terminal           C:\Program Files\<Broker> MT5\terminal64.exe
+  data directory     C:\Users\You\AppData\Roaming\MetaQuotes\Terminal\0123456789ABCDEF...
   control ids        ok
     build            6230 (ids measured on 6230)
 ```
@@ -266,7 +266,7 @@ signal. If a path you configured is wrong, it is named there:
 
 ```
   cannot run here
-    - no terminal at C:\Program Files\Alpari MT5_4\termnal64.exe
+    - no terminal at C:\Program Files\<Broker> MT5\terminal64.exe
 ```
 
 **`control ids: ok` means the identifiers were measured on this build**, not that
@@ -333,6 +333,24 @@ That runs, in order:
 | `mypy` | untyped definitions, wrong `Optional` handling, bad return types |
 | `pytest` | behaviour |
 | domain isolation | a domain module importing an adapter, a port, or a private upstream repository |
+
+### What is skipped, and why
+
+On a machine without the private projects or a terminal, the default run reports
+something like `1184 passed, 84 skipped`. That is the expected, clean state, not a
+partial failure:
+
+| Skipped because | Mechanism | To run them |
+|---|---|---|
+| the private `auto_trade` package is not importable | `@pytest.mark.requires_auto_trade` | set `AUTO_TRADE_PATH`, run `scripts/setup.*` |
+| `albrooks` is not installed | `pytest.importorskip` | set `ALBROOKS_PATH`, run `scripts/setup.*` |
+| the live MT5 tests are opt-in | `BRIDGE_ALLOW_MT5_TESTS=1` | also set the `BRIDGE_TEST_*` variables in `.env.example` |
+
+Every skip carries its reason in the `-rs` summary. The live tests read the terminal
+path, data folder and demo login from the environment and **never from the
+repository**: an earlier revision hard-coded one machine's install path, profile name
+and demo account, which made those tests fail everywhere else and put personal
+details in version control.
 
 **The domain isolation check is the one that matters most architecturally.** Both
 upstream projects are private and cannot be installed from an index, so if the
@@ -439,6 +457,22 @@ or if the latest recorded probe found anything drifted or missing. **The number
 cannot be edited without producing the evidence for it**, which is the difference
 between a measurement and a constant somebody changed to quiet a warning.
 
+`scripts/control_ids.py` reads `AUTO_TRADE_PATH`, `BRIDGE_MT5_TERMINAL_PATH` and
+`BRIDGE_MT5_DATA_PATH`; if any is unset it exits `2` and names it, rather than
+guessing a path.
+
+### The terminal's trading mode is a gate too
+
+Matching control identifiers say the order dialog is where it was measured. They do
+**not** say which values a click will send. With **Algo Trading off**, the terminal
+sends the Toolbox *Trade panel's* volume and no stop loss or take profit, whatever the
+order ticket holds. The executor therefore reads `terminal_info().trade_allowed`
+before it clicks and **refuses any order carrying a stop or target** unless that flag
+is exactly `True`; an unreadable terminal reads as "not allowed". Turning Algo
+Trading on is your decision, taken by hand in the toolbar, and nothing in this
+project does it for you. (`account_info().trade_mode` is not used: it is the account
+*type* -- demo, contest, real -- and says nothing about Algo Trading.)
+
 ### This gate is not the only thing between you and an order
 
 `control ids: ok` means the machine passed *one* gate. The default configuration
@@ -452,6 +486,7 @@ still cannot trade, and cannot be made to by this section:
 | the ledger is readable | checked when the live side is assembled |
 | the account is `DEMO` | checked when the live side is assembled |
 | the kill switch is clear | checked when the live side is assembled |
+| the terminal allows algo trading (`trade_allowed`) | checked by the executor immediately before the click |
 
 And the one that is a code path rather than a setting: the default composition root,
 `build_bridge()`, returns `can_execute=False` with no executor attached. Reaching an

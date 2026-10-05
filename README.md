@@ -7,10 +7,11 @@ engine and an automated trading execution system, with explicit risk management,
 a default risk of **0.5% of account balance per trade**, and a default
 **1:1 risk/reward**.
 
-> **Status: Phase 7 half done — the MT5 data adapter.** No order has been placed
-> and no terminal has been opened.
-> See [HANDOFF.md](HANDOFF.md) for exactly where the project stands and
-> [docs/architecture.md](docs/architecture.md) for the design this audit produced.
+> **Status: Pre-alpha. Phases 0–14 complete; Phase 15 (the One Click Trading guard) is
+> wired and tested but not yet verified against a real terminal.** The default
+> configuration cannot place an order. See [HANDOFF.md](HANDOFF.md) for exactly where
+> the project stands, [ROADMAP.md](ROADMAP.md) for what comes next, and
+> [docs/architecture.md](docs/architecture.md) for the design.
 
 ---
 
@@ -55,24 +56,29 @@ either.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Repository audit, architecture, integration contracts | 𧀅 complete |
-| 1 | Project foundation, packaging, configuration, test harness | 𧀅 complete |
-| 2 | Al Brooks signal adapter | 𧀅 complete |
-| 3 | Stop, take-profit and validation policies | 𧀅 complete |
-| 4 | Risk management and position sizing | 𧀅 complete |
-| 5 | 1:1 risk/reward take-profit policy | 𧀅 complete |
-| 6 | Trade validation pipeline | 𧀅 complete |
-| 7 | MT5 account/symbol adapter | 𧀅 complete |
-| 7b | auto-trade execution adapter | 𧀅 complete |
-| 8 | Dry run / simulation mode | 𧀅 complete |
-| 9 | Idempotency and duplicate protection | 𧀅 complete |
-| 10 | End-to-end integration | 𧀅 complete |
-| 11 | MT5 / demo validation (isolated, opt-in) | 𧀅 complete — live side assembles |
-| 12 | Documentation, CLI, public API | 𧀅 complete |
-| 13 | Final architecture review | 𧀅 complete |
+| 0 | Repository audit, architecture, integration contracts | ✅ complete |
+| 1 | Project foundation, packaging, configuration, test harness | ✅ complete |
+| 2 | Al Brooks signal adapter | ✅ complete |
+| 3 | Stop, take-profit and validation policies | ✅ complete |
+| 4 | Risk management and position sizing | ✅ complete |
+| 5 | 1:1 risk/reward take-profit policy | ✅ complete |
+| 6 | Trade validation pipeline | ✅ complete |
+| 7 | MT5 account/symbol adapter | ✅ complete |
+| 7b | auto-trade execution adapter | ✅ complete |
+| 8 | Dry run / simulation mode | ✅ complete |
+| 9 | Idempotency and duplicate protection | ✅ complete |
+| 10 | End-to-end integration | ✅ complete |
+| 11 | MT5 / demo validation (isolated, opt-in) | ✅ complete — live side assembles |
+| 12 | Documentation, CLI, public API | ✅ complete |
+| 13 | Final architecture review | ✅ complete |
+| 14 | Arming the machine; first real demo order | ✅ complete — exposed the defect below |
+| 15 | One Click Trading guard | 🟡 wired + unit-tested; **real-terminal check pending** |
+| 16 | Repository hygiene, test portability, doc sync | ✅ complete |
 
-**1235 tests passing, 97% coverage.** Lint, format, type check, the
-domain-isolation check and a full layer-graph check all clean. The suite runs **without the upstream projects
+**1184 tests passing, 84 skipped, 93% coverage** on a clean machine with neither
+upstream project nor MetaTrader 5 installed (the skips are the tests that genuinely
+need `auto_trade`, `albrooks` or a live terminal, each with a stated reason). Lint,
+format, type check, the domain-isolation check and a full layer-graph check all clean. The suite runs **without the upstream projects
 and without MetaTrader 5** — the MT5 adapter takes its bindings by injection,
 which is what makes that possible.
 
@@ -96,14 +102,18 @@ sending, and the default configuration still cannot send:
   defaults. Reaching `build_live()` requires a deliberate call with both changed,
   plus a `DEMO` account, a readable ledger and a clear kill switch.
 
-**Known open defect, found by the first real order:** the order dialog's *input*
-fields are not being written. The symbol and the Buy/Sell click land, so a position
-opens — but the volume, stop loss and take profit do not, and a position with no
-stop is worse than no position at all. The system reports this correctly as
-`UNKNOWN`, because it cannot prove the opened position matches the request. See
-[HANDOFF.md](HANDOFF.md), Phase 14.
+**Known defect, found by the first real orders and now guarded (Phase 15):** the first
+demo orders filled at the Trade panel's default volume with **no stop loss and no take
+profit**, while the order dialog read back exactly what was requested. The cause was
+not the field writes: with Algo Trading off, the terminal sends the Toolbox Trade
+panel's values rather than the ticket's, and that panel carries no stop. The executor
+now reads `terminal_info().trade_allowed` before the click and **refuses** any order
+carrying a stop or target when it is not `True`. The guard is covered by unit tests;
+it has **not yet been exercised against a live terminal**, and enabling Algo Trading
+remains the operator's decision, made by hand. See [HANDOFF.md](HANDOFF.md), Phases
+15–16.
 
-No order has been placed by this project. A volume below the broker's minimum is
+A volume below the broker's minimum is
 refused rather than floored up, always.
 
 ---
@@ -123,6 +133,11 @@ Copy-Item .env.example .env
 
 .\scripts\test.ps1
 ```
+
+The default suite needs neither upstream project nor a terminal. Tests that do need
+one are skipped with a reason; the opt-in live tests are configured through the
+`BRIDGE_TEST_*` variables in `.env.example` and are never given machine paths by the
+repository itself.
 
 Full instructions, including Linux and macOS, are in
 [docs/setup.md](docs/setup.md).
@@ -182,6 +197,7 @@ second position.
 | [docs/signal-flow.md](docs/signal-flow.md) | What happens to a signal, step by step, and where it can stop |
 | [docs/risk-management.md](docs/risk-management.md) | The stop, take-profit and validation policies, and the sizing boundary |
 | [docs/setup.md](docs/setup.md) | How to install and run it on a laptop |
+| [ROADMAP.md](ROADMAP.md) | What is done, what is next, and what is deliberately out of scope |
 | [HANDOFF.md](HANDOFF.md) | Where the project stands, and how to continue it |
 
 ---

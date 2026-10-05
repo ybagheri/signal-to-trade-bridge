@@ -293,11 +293,22 @@ def build_live(
 
     ledger = resolve_ledger(config, resolved)
     kill_switch, audit, workflow = _live_side(resolved, config, ledger)
-    # `live_bindings`, not `resolved`: the executor needs the **MT5** bindings to read
-    # the terminal's trading mode. `resolved` is the execution project's bindings, and
-    # they know nothing about the terminal.
+    # **Both** binding sets reach the executor, as separate arguments: `resolved` is the
+    # execution project's namespace (it translates the order), `live_bindings` is the
+    # terminal (it answers whether the order's stop can be carried). Passing one in the
+    # other's place is what left the One Click Trading guard inert -- see HANDOFF,
+    # Phase 15 -- so `_finish` takes them by name.
     return _finish(
-        config, risk, account, symbols, ledger, live_bindings, kill_switch, audit, workflow
+        config,
+        risk,
+        account,
+        symbols,
+        ledger,
+        auto_trade_bindings=resolved,
+        mt5_bindings=live_bindings,
+        kill_switch=kill_switch,
+        audit=audit,
+        workflow=workflow,
     )
 
 
@@ -374,7 +385,9 @@ def _finish(
     account: Any,
     symbols: Any,
     ledger: Any,
-    bindings: Any,
+    *,
+    auto_trade_bindings: Any,
+    mt5_bindings: Any,
     kill_switch: Any,
     audit: Any,
     workflow: Any,
@@ -394,7 +407,12 @@ def _finish(
     #
     # They are the same bindings the account and symbol providers were built from,
     # so the mode is read from the terminal the order would actually go through.
-    executor = AutoTradeExecutor(workflow, bindings=bindings, kill_switch=kill_switch)
+    executor = AutoTradeExecutor(
+        workflow,
+        bindings=auto_trade_bindings,
+        mt5_bindings=mt5_bindings,
+        kill_switch=kill_switch,
+    )
     pipeline.wire_execution(
         build_execution_envelope(executor=executor, idempotency=ledger, kill_switch=kill_switch)
     )
@@ -405,7 +423,7 @@ def _finish(
         symbols=symbols,
         ledger=ledger,
         can_execute=True,
-        bindings=bindings,
+        bindings=auto_trade_bindings,
     )
 
 

@@ -12,29 +12,27 @@
 
 ## Current Status
 
-**Phases 0–7 complete. Phase 7 was two halves: the MT5 data adapter, which reads
-real account facts from the terminal's own published snapshot, and the execution
-adapter, which wraps `auto-trade`'s real workflow rather than its bare terminal
-adapter. Phase 8 is dry run.**
+**Phases 0–14 complete. Phase 15 (the One Click Trading guard) is now wired and
+unit-tested but NOT verified against a real terminal. Phase 16 (repository hygiene,
+test portability, documentation sync) is complete.** Read *Phase 16* below first: it is
+the most recent work and it corrects several things older sections still say.
 
-Phase 0 audited the upstream repositories. Phase 1 built the foundation. Phase 2
-built the first adapter. Phase 3 gave the domain its **policies**. Phase 4 added
-**risk management and position sizing**. Phase 5 finished the **reward:risk
-policy**. Phase 6 assembled them into `ProcessSignal`, the first thing in the
-project that calls the others. Phase 7 built the **MT5 data adapter** and the
-**execution adapter** — the last things between the pipeline and a real order.
-
-**1235 tests passing, 97% coverage.** Lint, format, type check and the
-domain-isolation check all clean. The suite still runs **without `albrooks`**
-**or `MetaTrader5`** installed, because the adapter takes its bindings by injection.
+**1184 tests passing, 84 skipped, 93% coverage** on a clean machine with neither
+`auto_trade`, `albrooks` nor `MetaTrader5` installed. Lint, format, mypy (48 source
+files) and the domain-isolation check are clean. The skips are tests that genuinely
+need a missing package or a live terminal, each marked with a reason. *(Older sections
+quote 1235 / 1247 passed; those counts were taken on a machine with `auto_trade`
+installed and are historical.)*
 
 ```
-Last completed phase: 14
-Current phase:       15 — STOPPED mid-investigation. Root cause found; the guard
-                     for it is written but inert. See "Phase 15" below.
-Next phase:          finish Phase 15: give the executor the MT5 bindings, remove
-                     the duck-type check, then re-send and expect a refusal
+Last completed phase: 16
+Current phase:       none open
+Next phase:          17 — verify the One Click guard on a real terminal (see ROADMAP.md)
 ```
+
+**Older text below describes the project as it stood at the time each phase was
+written. Where it conflicts with Phase 16, Phase 16 wins** (and the repository wins
+over both).
 
 ### The blocker is gone, and the live path is armed
 
@@ -158,11 +156,12 @@ phase placed an order, and the two ad-hoc checks that assembled the live side fo
 - [x] Phase 8 — Dry run reporting
 - [x] **Phase 9** — Idempotency, and the envelope that made it safe
 - [x] **Phase 10** — End-to-end integration, and the composition root
-- [~] Phase 11 — live side built and validated read-only; **blocked on ids**
+- [x] Phase 11 — live side built; control ids re-measured on build 6230 (see Phase 13/14)
 - [x] Phase 12 — CLI, public API, setup documentation
 - [x] Phase 13 — Final architecture review
 - [x] Phase 14 — armed the machine, placed the first real order
-- [~] Phase 15 — **stopped mid-investigation**; root cause found, guard inert
+- [~] Phase 15 — root cause found; guard now **wired and unit-tested** (Phase 16); real-terminal verification still open
+- [x] Phase 16 — repository hygiene, test portability, guard wiring fix, documentation sync
 
 ---
 
@@ -816,13 +815,13 @@ OK, nothing drifted, nothing missing.
 **1. `account_info().name` is the account holder's display name, not the server.**
 
 ```
-terminal title bar   53184454 - Alpari-MT5-Demo: Demo Account - Hedge - Alpari - [USDInd,H1]
-account_info().login  53184454
-account_info().name   "YouJos Hundred"        <- the account holder's name
+terminal title bar   10000001 - Alpari-MT5-Demo: Demo Account - Hedge - Alpari - [USDInd,H1]
+account_info().login  10000001
+account_info().name   "Example Account Holder"        <- the account holder's name
 ```
 
 The bridge maps that field to `AccountBalance.server`, so a log line reading
-`server=YouJos Hundred` is **the adapter reporting faithfully**. The field name is
+`server=Example Account Holder` is **the adapter reporting faithfully**. The field name is
 the terminal's, not this project's, and renaming it would be the bug rather than the
 fix. Recorded so nobody later "corrects" it.
 
@@ -845,7 +844,7 @@ that looks exactly like a terminal with no market data.
 
 `BRIDGE_ALLOW_MT5_TESTS=1 python -m pytest tests/live` — **21 passed, 0 skipped.**
 
-* the terminal is running and logged in as `53184454`
+* the terminal is running and logged in as `10000001`
 * the account provider reads balance, equity, currency and login from it
 * the symbol provider reads `trade_contract_size`, `trade_tick_size`,
   `trade_tick_value_profit` and the rest — **the field names Phase 7 could not
@@ -890,7 +889,7 @@ be confirmed from **at least two sources**. Two independent sources agree:
 `auto-trade`'s control ids were measured on **6184**. That is a **46-build gap**,
 so Known Issue 5 is now a *confirmed* risk rather than an unknown one, and Phase 11
 owns it. Also confirmed from the snapshot: `server: Alpari-MT5-Demo` and
-`account: 53184454` — the demo target Q3 asks for, and no real money is in reach.
+`account: 10000001` — the demo target Q3 asks for, and no real money is in reach.
 
 
 ---
@@ -2412,7 +2411,7 @@ the balance is 100001.54, and no position is open.
 guard.**
 
 **Account state: flat. Balance 100000.91, no positions, no pending orders, one
-terminal (pid 11228, account 53184454). No order is open.**
+terminal (pid 11228, account 10000001). No order is open.**
 
 ### The root cause, established with evidence
 
@@ -2529,6 +2528,93 @@ were in the dialog every single time.
 
 ---
 
+## Phase 16 — Hygiene, portability, and finishing the Phase 15 guard
+
+This session started from the Phase 15 hand-off ("stopped mid-investigation") and a
+repository whose test suite, on a clean machine, was **27 failed and 6 errors**. It
+ended at **1184 passed, 84 skipped, 0 failed**. Nothing here placed an order or opened
+a terminal.
+
+### What was wrong, and what was done
+
+1. **The suite was not portable (the 33 failures).** Three causes, all of them tests
+   asserting things that only hold on the author's machine:
+   * **Tests needing the private `auto_trade` package ran unconditionally.** They are
+     now marked `@pytest.mark.requires_auto_trade` (registered in `pyproject.toml`) and
+     skipped, with a reason, by `pytest_collection_modifyitems` in `tests/conftest.py`
+     when the package is absent. `tests/unit/test_live_assembly.py` is marked as a whole
+     module: it patches `auto_trade.*` dotted paths and builds the real
+     `TerminalProfile`, so its docstring's old claim that it needs no private package was
+     wrong and has been corrected.
+   * **`build_bridge` could not be built without `auto_trade`**, because it refuses when
+     the ledger is unavailable. `build_bridge` gained an optional `ledger=` argument (an
+     injected ledger is trusted, exactly as an injected binding set already was; omitting
+     it behaves as before). `tests/stubs.InMemoryLedger` satisfies the port, and the
+     `bridge_factory` fixture uses it, so the CLI-report tests no longer depend on the
+     private package. *This proves the bridge is wired correctly, not that upstream's
+     ledger is durable — `TestAgainstTheRealLedger` still covers that where the package
+     exists.*
+   * **Tests pointed at the author's real terminal.** They now use a synthetic terminal:
+     `tests/terminal_fixtures.py` (shared helpers) and the `fake_terminal` fixture. The
+     two assertions that are only meaningful against a real install
+     (`6230` read from the real executable and snapshot) are gated by
+     `@needs_real_terminal`, driven by `BRIDGE_TEST_*` variables (see `.env.example`).
+2. **Personal data was committed.** A demo account login, the account holder's display
+   name, a Windows profile name, install paths and a terminal-instance hash appeared in
+   source, tests, docs and this file. All were replaced with neutral placeholders; the
+   live tests, and `scripts/control_ids.py`, now read their machine-specific values from
+   the environment and refuse or skip with a message when unset. **Git history still
+   contains the originals.** If this repository is, or will become, public, rewrite
+   history (`git filter-repo`) and consider the demo login and profile name disclosed.
+3. **The Phase 15 guard was inert, and is now wired.** `AutoTradeExecutor` takes a
+   separate `mt5_bindings` parameter (typed by the new `TradeModeSource` protocol in
+   `adapters/mt5/execution_mode.py`); `live.py` passes the execution project's bindings
+   and the terminal's bindings **by name** to `_finish`. `_looks_like_mt5_bindings` was
+   deleted. Five new tests (`TestTheOneClickGuard`) assert an order with a stop is
+   refused *before* the workflow is reached, that an unreadable terminal refuses, and
+   that the two binding sets are distinct parameters.
+4. **The guard's mode test was reading the wrong field.** `is_one_click_trading` treated
+   `account_info().trade_mode == 0` as "trading disabled". In MetaTrader 5 that field is
+   `ENUM_ACCOUNT_TRADE_MODE` (0 DEMO, 1 CONTEST, 2 REAL): it is the account *type*. So
+   every demo account read as one-click, and a real account with Algo Trading off read
+   as fine. The decision now rests **only** on `terminal_info().trade_allowed`; anything
+   other than an exact `True`, or an unreadable terminal, reads as one-click. Tests were
+   rewritten to assert that `trade_mode` cannot change the answer either way.
+   *(The Phase 15 text above, and its measured `trade_mode == 0`, record what the
+   terminal reported; the interpretation of that number is what was wrong.)*
+5. **Documentation was stale.** `README.md` and `README_FA.md` said "Phase 7 half done",
+   quoted old test counts, described the One Click defect as "input fields not being
+   written", and rendered every ✅ as a garbled glyph. All corrected; `ROADMAP.md` was
+   added; `docs/setup.md` gained "what is skipped and why", the trading-mode gate and the
+   re-measurement variables.
+
+### What is still not verified (do not read this phase as closing Phase 15)
+
+* **The guard has never run against a real terminal.** Its tests use doubles. In
+  particular, whether `terminal_info().trade_allowed` is `False` in exactly the state
+  that produced the stop-less fills — and `True` once Algo Trading is enabled — is an
+  inference from one machine's behaviour, not a documented MT5 guarantee. Check it with
+  a read-only probe before relying on it. Note also that MT5's One Click Trading is a
+  separate setting (Tools → Options → Trade); the Phase 15 diagnosis ties the symptom to
+  the Algo Trading button because that is what the screenshot showed. If the two ever
+  diverge on a build, the guard must be revisited.
+* **Phase 15 steps 4–6 remain**: join `execution_mode` to the `check_control_ids` seam,
+  test against the real terminal, and only then re-send with Algo Trading still off,
+  expecting a refusal.
+* `tests/integration` (real `albrooks`) and `tests/live` have not run here.
+* The upstream `AuditLogger` file-handle leak (Phase 14) is still recorded, not fixed.
+
+### Verification (this session)
+
+```
+ruff check .            All checks passed
+ruff format --check .   clean
+mypy                    Success: no issues found in 48 source files
+pytest                  1184 passed, 84 skipped, 93% coverage
+```
+
+---
+
 ## Known Issues
 
 Issues found **in the upstream repositories** during the audit. They are recorded
@@ -2561,7 +2647,7 @@ to fix without the maintainer's agreement.
    re-measure every control id against 6230 before anything is clicked. **Do not
    trust an id captured on 6184.**
 6. **`auto-trade`'s defaults hard-code another machine's absolute paths** —
-   `C:\Program Files\Alpari MT5_2\...` and a `C:\Users\BazikadeStore\...` data
+   `C:\Program Files\Alpari MT5_2\...` and a `C:\Users\YourUser\...` data
    path. The bridge must read none of its configuration.
 7. **Neither upstream is on PyPI.** Both are private git repositories. The
    dependency strategy in `docs/architecture.md §7` exists because of this.
@@ -2642,32 +2728,15 @@ the two-phase port, and the `ExecutionRequest.take_profit` fix Phase 8 left open
 See *What Phase 10 Built* above. The composition root, and the `signal_id` repair
 Phase 9 left for here.
 
-#### Phase 11 — MT5 / demo validation  ← **built, and blocked on the machine**
+#### Phase 11 — MT5 / demo validation  ← **done**
 
-See *What Phase 11 Found* above. The live side is assembled by `live.py` and every
-read-only path is verified against the real terminal. **The one thing that cannot be
-done on this machine is the last 5%**: the control identifiers belong to build 6184
-and this terminal is 6230.
+Closed by measurement, not by editing a number: `auto-trade terminal-check` reported
+13 of 13 controls OK on build 6230 and `MEASURED_ON_BUILD` / `EXPECTED_BUILD` moved to
+6230 afterwards (see Phases 13–14). The heading and the three-step list that used to
+sit here described the state *before* that and were removed in Phase 16.
 
-**What closing it needs, and it needs a human watching:**
-
-1. every identifier re-measured on build **6230**, at this display resolution
-2. the measurements recorded here **with the build they were measured on** — a
-   measurement without its build is a measurement that will be stale silently
-3. `MEASURED_ON_BUILD` in `live.py` updated, and `EXPECTED_BUILD` in
-   `scripts/control_ids.py` with it
-
-Steps 1 and 2 are the whole of it. Step 3 is one line in two places.
-
-**What is already done and does not need repeating:** the data adapter is verified
-live, the dry run reports in full, the envelope carries its three collaborators, the
-ledger is durable and refuses when unreadable, and the default configuration still
-cannot trade.
-
-Phases 12 and 13 are done: the CLI, the public API, the setup guide, and the
-architecture review. **Every phase that does not need a terminal is now finished.**
-The re-measurement above is the only outstanding work in the project, it is blocked
-on a human, and it cannot be done from a script by design.
+Phases 12–14 are done. **Outstanding work now lives in `ROADMAP.md`**, which is kept
+current; this section is history and is not updated.
 
 ---
 
@@ -2712,9 +2781,9 @@ data code is shared with the upstream project or lives here. That is a smaller
 decision than it was, which was most of the point of writing the fakes first.
 
 **Q3. Live MT5 validation target.** Alpari demo. On the current machine:
-terminal `C:\Program Files\Alpari MT5_4\terminal64.exe`, data folder
-`C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352DBDC25D08FEC12BD2`,
-build **6230** (confirmed twice, see Known Issue 5), account `53184454` on
+terminal `C:\Program Files\<Broker> MT5\terminal64.exe`, data folder
+`C:\Users\YourUser\AppData\Roaming\MetaQuotes\Terminal\0123456789ABCDEF0123456789ABCDEF`,
+build **6230** (confirmed twice, see Known Issue 5), account `10000001` on
 `Alpari-MT5-Demo`. The terminal was **not** opened or clicked, and **must not be
 touched outside Phase 11**. Reading its published snapshot file is not touching it.
 
@@ -2766,12 +2835,12 @@ this section described a different machine and different paths. It is replaced
 rather than appended, because a stale environment section is worse than none: it
 sends the next person to a directory that does not exist.
 
-- Terminal: `C:\Program Files\Alpari MT5_4\terminal64.exe`
+- Terminal: `C:\Program Files\<Broker> MT5\terminal64.exe`
 - Data folder:
-  `C:\Users\BazikadeStore\AppData\Roaming\MetaQuotes\Terminal\1D9617E1A6A4352DBDC25D08FEC12BD2`
+  `C:\Users\YourUser\AppData\Roaming\MetaQuotes\Terminal\0123456789ABCDEF0123456789ABCDEF`
 - Workspace: `D:\Projects\signal-to-trade-bridge`
 - Python: 3.12.9, the standard install at
-  `C:\Users\BazikadeStore\AppData\Local\Programs\Python\Python312\`
+  `C:\Users\YourUser\AppData\Local\Programs\Python\Python312\`
 - Upstream checkouts: **not present on this machine.** `albrooks` is not
   installed, which is why `tests/integration/test_albrooks_real.py` skips at
   import rather than running its nine tests.
@@ -2811,7 +2880,7 @@ except MT5 itself must work on a laptop where nothing lives on `D:`.
 | | |
 |---|---|
 | This repository | `git@github.com:ybagheri/signal-to-trade-bridge.git` |
-| Local path | `D:\Projects\signal-to-trade-bridge` |
+| Local path | wherever you cloned it (no path is recorded in the repository) |
 | Upstream A | `git@github.com:ybagheri/al-brooks-price-action-engine.git` |
 | Upstream B | `git@github.com:ybagheri/auto-trade.git` |
 | Python | `>=3.11` (the higher of the two upstreams' floors) |
@@ -2822,8 +2891,12 @@ except MT5 itself must work on a laptop where nothing lives on `D:`.
 
 ## Git Status
 
-Branch `main`, tracking `origin/main`. Working tree state at the time Phase 6
-was written: see the commit list below.
+> **Stale by design (Phase 16).** This list stops at Phase 7's commit and the upload this
+> session worked from carried no `.git` directory, so no hash could be verified or
+> recorded. Phase 16's changes are **uncommitted in the delivered tree**. The only
+> authoritative state is `git status` and `git log` on your machine.
+
+Branch `main`, tracking `origin/main`. The list below is the early history.
 
 ```
 e559a4a  feat: the MT5 data adapter -- account and symbol facts from a real terminal
@@ -3169,7 +3242,7 @@ touched an adapter — and now partly relevant to Phase 7:
 2. `git status`
 3. `git log --oneline -n 10`
 4. Run the suite: `.\scripts\test.ps1`, or `python -m pytest -q` if the
-   virtual environment is not set up. **989 tests, 16 skipped, without the opt-in.** If
+   virtual environment is not set up. **1184 passed, 84 skipped on a machine without the private projects or a terminal** (see Phase 16). If
    they do not, the repository is not in the state this file describes, and the
    repository wins.
 5. Read `docs/architecture.md` §4 (the gap analysis), §5 (the design) and **§9
@@ -3182,21 +3255,15 @@ touched an adapter — and now partly relevant to Phase 7:
 9. Verify the actual repository state against this file. **If they conflict, the
    repository wins and this file must be corrected.**
 
-**Then start Phase 7b** — the `auto-trade` execution adapter — from the Remaining
-Work list above. It needs a machine where `scripts/setup.ps1` has been run and the
-`auto_trade` checkout exists; it cannot be done here.
+**Then pick up from `ROADMAP.md`.** The next piece of work is Phase 17: verifying the
+One Click Trading guard on a real terminal (Phase 15 steps 4–6). It needs a Windows
+machine with a running MT5 terminal logged into a **demo** account, the private
+`auto_trade` checkout, and a person watching; nothing in it can be done from a script
+or from a clean machine. Do not enable Algo Trading on the operator's behalf.
 
-**If you are on a machine with those checkouts**, the order is: write
-`adapters/auto_trade/executor.py` against the real `ExecutionWorkflow`, then
-`FakeTradeExecutor` (the last unimplemented port), and only then let
-`ProcessSignal` grow an executor reference — at which point
-`test_this_module_holds_no_executor` must be revisited deliberately, not deleted
-quietly. The ledger, the kill switch and the audit log come with it.
-
-**If you are not**, the useful work available here is Phase 8: turning
-`DRY_RUN_COMPLETED` into a real report, and the CLI/composition root that wires
-the pipeline and the MT5 adapter together. Both are pure application-layer work
-and both are untested for want of a caller — which is the same trap Phase 6 found.
+**On a machine without those**, the useful work available is documented in
+`ROADMAP.md` under "Doable without a terminal" — none of it needs, or may touch, a
+live terminal.
 
 **Five AST tests before writing anything that touches money, ratios, or the
 pipeline order:**

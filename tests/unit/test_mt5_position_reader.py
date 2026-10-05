@@ -39,7 +39,7 @@ _LIVE_ENVELOPE = {
     "sequence": 410,
     "complete": True,
     "written_at": "2026-10-01T05:30:16Z",
-    "account": 53184454,
+    "account": 10000001,
     "server": "Alpari-MT5-Demo",
     "terminal_build": 6230,
     "positions": [],
@@ -92,7 +92,7 @@ class TestTheEnvelope:
     def test_a_live_envelope_parses(self) -> None:
         snapshot = parse_snapshot(json.dumps(_LIVE_ENVELOPE))
         assert snapshot.sequence == 410
-        assert snapshot.account == 53184454
+        assert snapshot.account == 10000001
         assert snapshot.server == "Alpari-MT5-Demo"
         assert snapshot.terminal_build == 6230
         assert snapshot.count == 0
@@ -347,13 +347,13 @@ class TestTheTolerances:
         snapshot = parse_snapshot(
             json.dumps(
                 _envelope(
-                    account="53184454",
+                    account="10000001",
                     server="  ",
                     terminal_build="not a number",
                 )
             )
         )
-        assert snapshot.account == 53184454
+        assert snapshot.account == 10000001
         assert snapshot.server is None
         assert snapshot.terminal_build is None
 
@@ -395,9 +395,9 @@ class TestTheTolerances:
         # `parse_float=Decimal` means every number in the document is a `Decimal`,
         # including the ones nothing depends on. The branch is pinned so that a
         # future change to the parse hooks cannot quietly break the int fields.
-        snapshot = parse_snapshot(json.dumps(_envelope(terminal_build=6230, account=53184454)))
+        snapshot = parse_snapshot(json.dumps(_envelope(terminal_build=6230, account=10000001)))
         assert snapshot.terminal_build == 6230
-        assert snapshot.account == 53184454
+        assert snapshot.account == 10000001
 
     def test_a_boolean_is_not_mistaken_for_an_integer(self) -> None:
         # `isinstance(True, int)` is true in Python, and `True` as a ticket or a
