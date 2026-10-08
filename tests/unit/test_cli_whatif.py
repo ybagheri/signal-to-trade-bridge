@@ -124,12 +124,15 @@ class _RecorderPipeline:
 
 
 def _run_with_spy_live(
-    *argv: str, expect_recorder: bool = True
+    *argv: str, expect_recorder: bool = True, captured: list | None = None
 ) -> tuple[int, str, _RecorderPipeline]:
     """Run `main` with `build_live` replaced by one that hands back a spy pipeline.
 
     `expect_recorder` is passed to the spy, which is how the two tests in this file
     assert opposite things about the same code path without either of them lying.
+    `captured`, when given a list, receives the ``(args, kwargs)`` each `build_live`
+    call arrived with -- so a test can assert *what configuration* the live side
+    was assembled from, not just that it was assembled.
     """
     # Imported first, so there is a real module to put back. Reading
     # `sys.modules["signal_to_trade_bridge.live"]` without importing it first raises
@@ -145,9 +148,14 @@ def _run_with_spy_live(
             self.pipeline = pipeline  # type: ignore[assignment]
             self.can_execute = True
 
+    def _fake_build(*args: object, **kwargs: object) -> _Bridge:
+        if captured is not None:
+            captured.append((args, kwargs))
+        return _Bridge()
+
     original = sys.modules["signal_to_trade_bridge.live"]
     sys.modules["signal_to_trade_bridge.live"] = SimpleNamespace(  # type: ignore[assignment]
-        build_live=lambda *a, **k: _Bridge(),
+        build_live=_fake_build,
         BuildMismatch=live_module.BuildMismatch,
     )
     try:
@@ -245,35 +253,46 @@ class TestWhatIfNeverSends:
         assert "needs --confirm-demo" not in output
         assert code in (EXIT_OK, EXIT_REFUSED)
 
-    def test_a_forbidding_configuration_still_refuses_what_if_without_confirm(
+    def test_a_safe_configuration_still_reaches_live_wiring(
         self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        # The `--what-if` exemption covers the confirmation flag only. A
-        # configuration that forbids execution still refuses before anything
-        # live is composed: `build_live` would raise if it were reached, so a
-        # clean configuration refusal proves no live composition occurred.
-        import signal_to_trade_bridge.live as live_module
-
-        _isolated(monkeypatch, tmp_path, BRIDGE_EXECUTION_ENABLED="false")
-
-        def _must_not_build(*args: object, **kwargs: object) -> object:
-            raise AssertionError("build_live must not run under a forbidding configuration")
-
-        original = sys.modules["signal_to_trade_bridge.live"]
-        sys.modules["signal_to_trade_bridge.live"] = SimpleNamespace(  # type: ignore[assignment]
-            build_live=_must_not_build,
-            BuildMismatch=live_module.BuildMismatch,
+        # The point of the flag: `--what-if` with the shipped safe defaults
+        # (`BRIDGE_EXECUTION_ENABLED=false`, `BRIDGE_DRY_RUN=true`) and no
+        # `--confirm-demo` must still assemble the live side. The stub records
+        # the configuration `build_live` arrived with: execution armed in
+        # memory only, while the environment stays safe. `.env` is untouched --
+        # `_isolated` sets no arming variable, and the arming exists only in
+        # the object handed to the assembly.
+        _isolated(monkeypatch, tmp_path)
+        captured: list = []
+        code, output, pipeline = _run_with_spy_live(
+            "trade", str(signal_file), "--what-if", captured=captured
         )
-        try:
-            out = StringIO()
-            code = main(["trade", str(signal_file), "--what-if"], out=out)
-        finally:
-            sys.modules["signal_to_trade_bridge.live"] = original  # type: ignore[assignment]
-        output = out.getvalue()
-        assert code == EXIT_REFUSED
-        assert "BRIDGE_EXECUTION_ENABLED is false" in output
-        assert "no order was sent" in output
+        assert len(captured) == 1, "the live side was never assembled"
+        (args, _kwargs) = captured[0]
+        effective = args[0]
+        assert effective.execution_enabled is True
+        assert effective.dry_run is False
+        # ... and the signal still went through the recorder, not the refusal.
+        assert pipeline.envelopes, "no envelope was wired, so the swap never happened"
+        assert "nothing was sent" in output
         assert "needs --confirm-demo" not in output
+        assert "configuration forbids" not in output
+        assert code in (EXIT_OK, EXIT_REFUSED)
+
+    def test_the_live_executor_is_detached_not_just_shadowed(
+        self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The guarantee behind the previous test: after the swap the pipeline
+        # holds the recorder, and the live stand-in -- whose `submit` raises --
+        # is no longer reachable through it. A preview that kept the real
+        # executor wired would pass every output assertion above and still send.
+        _isolated(monkeypatch, tmp_path)
+        _code, _output, pipeline = _run_with_spy_live("trade", str(signal_file), "--what-if")
+        current = pipeline._envelope
+        assert current is not None, "build_live should have wired an envelope"
+        assert type(current.executor).__name__ == "FakeTradeExecutor"
+        assert current.executor is not pipeline._initial.executor
 
     def test_without_the_flag_no_envelope_is_swapped(
         self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
