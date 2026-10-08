@@ -270,3 +270,98 @@ class TestObservability:
         unavailable = [e for e in events if e.get("event") == "SIGNAL_SOURCE_UNAVAILABLE"]
         assert unavailable
         assert unavailable[0]["reason"] == "MARKET_DATA_UNAVAILABLE"
+
+
+class _FakeFrozenSeries:
+    """Shaped like the engine's `FrozenSeries`: a non-iterable transport type.
+
+    Carries the analyzable bars on `.series` -- the attribute the engine's own
+    documented flow hands to the analyzer (`AnalysisSession().on_bars(
+    frozen.series, freeze=frozen.freeze)`). Deliberately defines no `__iter__`
+    and no `__len__`, so handing it to anything that iterates raises
+    `TypeError: '...' object is not iterable`, exactly like the real one.
+    """
+
+    def __init__(self, series: list[object]) -> None:
+        self.series = series
+
+
+class _StrictAnalyzer:
+    """Mimics the current engine boundary: it wraps input in `BarSeries`.
+
+    `BarSeries(bars, ...)` iterates its input, so a `FrozenSeries` handed in
+    directly raises `TypeError` -- the failure this class reproduces. The
+    ordinary `StubAnalyzer` never iterates, so it cannot catch this; a stub
+    that only proves itself consistent is how the breakage shipped.
+    """
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+        self.received: object = None
+
+    def analyze(
+        self,
+        bars: object,
+        symbol: str = "GENERIC",
+        timeframe: str = "UNKNOWN",
+        last_closed: int | None = None,
+    ) -> object:
+        self.received = bars
+        tuple(bars)  # type: ignore[arg-type] -- what BarSeries construction does
+        return self._result
+
+
+class TestFrozenSeriesUnwrap:
+    """`MT5Feed.closed_bars` returns `FrozenSeries`; the analyzer takes series."""
+
+    def test_the_analyzer_receives_the_inner_series_not_the_wrapper(self) -> None:
+        inner = [{"close": 1.1}, {"close": 1.2}]
+        analyzer = _StrictAnalyzer(stub_buy())
+        source = AlBrooksSignalSource(
+            StubMarketData(bars=_FakeFrozenSeries(inner)),  # type: ignore[arg-type]
+            analyzer=analyzer,  # type: ignore[arg-type]
+        )
+        signal = source.latest_signal("EURUSD", "H1")
+        assert signal is not None and signal.is_tradable
+        assert analyzer.received is inner
+
+    def test_plain_lists_still_pass_through_by_identity(self) -> None:
+        # The unwrap must not touch what already worked: a list provider's
+        # bars reach the analyzer as the identical object.
+        inner = [{"close": 1.1}, {"close": 1.2}]
+        analyzer = _StrictAnalyzer(stub_buy())
+        source = AlBrooksSignalSource(
+            StubMarketData(bars=inner),
+            analyzer=analyzer,  # type: ignore[arg-type]
+        )
+        source.latest_signal("EURUSD", "H1")
+        assert analyzer.received is inner
+
+    def test_a_frozen_series_keeps_real_bar_time_prices_and_identity(self) -> None:
+        # End to end through the previously failing path: current bar time in,
+        # current bar time out, with prices and the deterministic identity
+        # intact. Nothing invented -- the bars below stand in for MT5 output
+        # the way every stub in `tests/stubs.py` stands in for engine output.
+        import time
+
+        now = float(int(time.time()))
+        result = stub_buy()
+        result.last_closed_bar = 299
+        result.bar_features = [
+            {"index": 298, "time": now - 3600.0},
+            {"index": 299, "time": now},
+            {"index": 300, "time": now + 3600.0},
+        ]
+        analyzer = _StrictAnalyzer(result)
+        source = AlBrooksSignalSource(
+            StubMarketData(bars=_FakeFrozenSeries([{"close": 1.1}])),
+            analyzer=analyzer,  # type: ignore[arg-type]
+        )
+        first = source.latest_signal("EURUSD", "H1")
+        second = source.latest_signal("EURUSD", "H1")
+        assert first is not None and first.is_tradable
+        assert first.bar_time == now
+        assert first.entry == Decimal("1.10000")
+        assert first.stop_loss == Decimal("1.09700")
+        assert first.take_profit == Decimal("1.10300")
+        assert second is not None and second.signal_id == first.signal_id

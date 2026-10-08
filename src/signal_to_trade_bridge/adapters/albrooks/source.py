@@ -158,7 +158,7 @@ class AlBrooksSignalSource:
 
         try:
             result = self._resolve_analyzer().analyze(
-                bars, symbol=normal_symbol, timeframe=timeframe
+                _analyzable_bars(bars), symbol=normal_symbol, timeframe=timeframe
             )
         except InvalidSignalError:
             raise
@@ -180,7 +180,7 @@ class AlBrooksSignalSource:
             ) from exc
 
         outcome = map_result_to_signal(result)
-        self._guard_bar_identity(outcome, bars)
+        self._guard_bar_identity(outcome, _analyzable_bars(bars))
         self._log_outcome(normal_symbol, timeframe, outcome)
         return outcome
 
@@ -356,6 +356,31 @@ def abstention_reason(signal: Signal) -> str:
     if signal.direction is Direction.FLAT:
         return "the signal names a tradable action but no direction"
     return ""
+
+
+def _analyzable_bars(bars: object) -> object:
+    """The bars in the shape the analyzer accepts.
+
+    ``MT5Feed.closed_bars`` returns a ``FrozenSeries``, while
+    ``Analyzer.analyze`` takes ``Sequence[Bar | dict] | BarSeries`` and builds
+    a ``BarSeries`` from it -- which iterates its input, so a non-iterable
+    ``FrozenSeries`` fails with ``TypeError: 'FrozenSeries' object is not
+    iterable``. The engine's own documented flow hands the analyzer
+    ``frozen.series``, never the frozen wrapper::
+
+        frozen = feed.closed_bars("EURUSD", M15, 300)
+        result = AnalysisSession().on_bars(frozen.series, freeze=frozen.freeze)
+
+    So the frozen series is intentionally the *transport* type and ``.series``
+    is what gets analysed. Unwrapping here, at the adapter boundary, rather
+    than in the engine: the analyzer contract is unchanged, and anything
+    already analyzable (a list, a tuple, a ``BarSeries`` -- none of which
+    carries a ``series`` attribute) passes through untouched.
+    """
+    series = getattr(bars, "series", None)
+    if series is None:
+        return bars
+    return series
 
 
 def _newest_bar(bars: object) -> tuple[int | None, float | None]:
