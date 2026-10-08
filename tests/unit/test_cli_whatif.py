@@ -228,15 +228,52 @@ class TestWhatIfNeverSends:
             assert envelope.idempotency is not None  # type: ignore[attr-defined]
             assert envelope.kill_switch is not None  # type: ignore[attr-defined]
 
-    def test_it_needs_confirm_demo_too(self, signal_file: Path) -> None:
-        # Deliberate. `--what-if` sends nothing, so requiring the acknowledgement
-        # could look like friction -- but a flag that bypasses a permission is a flag
-        # that will be copy-pasted into the command *without* `--what-if` one day
-        # later, and the habit is the thing being protected.
-        out = StringIO()
-        code = main(["trade", str(signal_file), "--what-if"], out=out)
+    def test_it_does_not_need_confirm_demo(
+        self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # `--what-if` sends nothing -- the final executor is replaced by a
+        # recorder before the signal is handled -- so requiring the
+        # acknowledgement that guards *sending* would refuse a command that
+        # cannot send. The assertion inside the stub's `process` fails unless a
+        # recorder was in place when the signal was handled, so passing proves
+        # the confirmation gate was cleared *and* the substitution still
+        # happened, not just that the refusal message changed.
+        _isolated(monkeypatch, tmp_path, BRIDGE_EXECUTION_ENABLED="true", BRIDGE_DRY_RUN="false")
+        code, output, pipeline = _run_with_spy_live("trade", str(signal_file), "--what-if")
+        assert pipeline.envelopes, "no envelope was wired, so the swap never happened"
+        assert "nothing was sent" in output
+        assert "needs --confirm-demo" not in output
+        assert code in (EXIT_OK, EXIT_REFUSED)
+
+    def test_a_forbidding_configuration_still_refuses_what_if_without_confirm(
+        self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The `--what-if` exemption covers the confirmation flag only. A
+        # configuration that forbids execution still refuses before anything
+        # live is composed: `build_live` would raise if it were reached, so a
+        # clean configuration refusal proves no live composition occurred.
+        import signal_to_trade_bridge.live as live_module
+
+        _isolated(monkeypatch, tmp_path, BRIDGE_EXECUTION_ENABLED="false")
+
+        def _must_not_build(*args: object, **kwargs: object) -> object:
+            raise AssertionError("build_live must not run under a forbidding configuration")
+
+        original = sys.modules["signal_to_trade_bridge.live"]
+        sys.modules["signal_to_trade_bridge.live"] = SimpleNamespace(  # type: ignore[assignment]
+            build_live=_must_not_build,
+            BuildMismatch=live_module.BuildMismatch,
+        )
+        try:
+            out = StringIO()
+            code = main(["trade", str(signal_file), "--what-if"], out=out)
+        finally:
+            sys.modules["signal_to_trade_bridge.live"] = original  # type: ignore[assignment]
+        output = out.getvalue()
         assert code == EXIT_REFUSED
-        assert "--confirm-demo" in out.getvalue()
+        assert "BRIDGE_EXECUTION_ENABLED is false" in output
+        assert "no order was sent" in output
+        assert "needs --confirm-demo" not in output
 
     def test_without_the_flag_no_envelope_is_swapped(
         self, signal_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

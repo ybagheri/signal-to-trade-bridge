@@ -50,6 +50,9 @@ again.
     Added in Phase 14, and gated three ways: ``--confirm-demo`` must be given, the
     account must be a demo account, and the configuration must already have
     execution enabled and dry-run off. Any one of them missing is a refusal.
+    ``--what-if`` is the exception to the first gate: it builds the same live
+    wiring but replaces the final executor with a recorder, so it sends nothing
+    and needs no ``--confirm-demo``.
 
 ``config``
     Print the effective configuration. Nothing in it is a secret, and none of it is
@@ -72,6 +75,9 @@ a single combined check would leave an operator unable to tell which of the thre
 they had not done. That is the same reasoning as ``auto-trade execute
 --confirm-demo``, and it is why the flag exists at all: the point is not to make
 the order hard, it is to make the *intent* explicit at the moment it happens.
+``--what-if`` previews the live wiring with the final executor replaced by a
+recorder, so it sends nothing and is exempt from the third permission only --
+the configuration and control-identifier gates still apply.
 """
 
 from __future__ import annotations
@@ -736,7 +742,8 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     reason the module docstring changed. Three permissions are required and each is
     checked separately, so a refusal names the one that is missing:
 
-    1. ``--confirm-demo`` on the command line
+    1. ``--confirm-demo`` on the command line (not required with ``--what-if``,
+       which replaces the final executor with a recorder and sends nothing)
     2. ``execution_enabled`` and not ``dry_run`` in the configuration
     3. a terminal whose control identifiers were measured on its own build
 
@@ -744,7 +751,10 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     person was present. A configuration left armed on a machine is a machine that
     will trade the next time anything calls the live path; a flag has to be typed
     every time, which is the property that makes the difference between "the system
-    is configured to trade" and "somebody asked for a trade".
+    is configured to trade" and "somebody asked for a trade". ``--what-if`` is
+    exempt from number 1 only: it still builds the live side and still faces
+    gates 2 and 3, and the recorder substitution below is what keeps it from
+    sending.
 
     ``--what-if`` does everything except the click: it builds the live side, runs the
     signal through it, and prints the decision including the volume and the prices.
@@ -752,7 +762,7 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     "just try it" -- an order that is clicked and then found to be the wrong size is
     not a thing you can undo by reading the output.
     """
-    if not getattr(args, "confirm_demo", False):
+    if not getattr(args, "confirm_demo", False) and not getattr(args, "what_if", False):
         return _Outcome(
             EXIT_REFUSED,
             "  no order was sent.\n"
