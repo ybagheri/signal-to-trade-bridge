@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from signal_to_trade_bridge.adapters.albrooks.identity import compute_signal_id
 from signal_to_trade_bridge.adapters.albrooks.mapper import (
     AnalysisOutcome,
     map_result_to_signal,
@@ -185,7 +186,7 @@ class AlBrooksSignalSource:
         return outcome
 
     def _guard_bar_identity(self, outcome: AnalysisOutcome, bars: object) -> None:
-        """Refuse a signal whose identity has no bar in it. Phase 10.
+        """Repair a signal whose identity is missing its bar. Phase 10.
 
         ``compute_signal_id`` hashes ``bar_index`` and ``bar_time``, and **the bar
         is the unit of identity** -- that is what makes "the same reading on the
@@ -200,27 +201,80 @@ class AlBrooksSignalSource:
         suppress re-deliveries.** Different symbols and different setups still
         separate, and either field alone is enough, so it takes both being absent.
 
-        **Refused, and here rather than downstream.** The bar is knowable at exactly
+        **Repaired, and here rather than downstream.** The bar is knowable at exactly
         one place -- the adapter that read the bars and asked the engine to analyse
-        them -- and here the fallback bars are still in hand. That is what makes the
-        fix free: if the engine reported no bar, **the newest bar this adapter
-        actually supplied is the bar the reading was made on**, and it is not a
-        guess.
+        them -- and here the fallback bars are still in hand.
 
-        So this does not merely refuse. It repairs the identity from the bars the
-        analysis ran on, and refuses only when even those do not say.
+        Two cases, and they recover from different places:
 
-        A refusal here is a ``NO_TRADE`` upstream of every risk check, which is the
-        right direction: a signal whose key cannot distinguish it from another one
-        must not reach sizing, let alone the executor.
+        * **Both missing.** The engine reported no bar at all, so the index comes
+          from the series position and the time from its last element -- the newest
+          bar this adapter actually supplied, which under the default analysis
+          (``last_closed`` unset, i.e. the newest bar) is the bar the reading was
+          made on, not a guess.
+        * **Only the time missing.** The engine reported an index but no time
+          (e.g. a result whose per-bar records carry no timestamp). The time is
+          then read from the bar *at that reported index*, never from the newest
+          bar: the signal was made on the indexed bar, and dating it with another
+          bar's time would be a fabrication, not a repair.
+
+        A time the engine did report is never overwritten, and a reported time
+        alone (with a defaulted index) still discharges the guard: either field
+        separates two readings, and mixing the engine's authority with ours in one
+        key is worse than leaving the default.
+
+        Whenever a field is repaired, ``signal_id`` is recomputed from the repaired
+        fields. The id is a hash of the reading including its bar, so filling the
+        bar without re-hashing would leave an identity that still has no bar in
+        it -- the exact collision this guard exists to close.
         """
         signal = outcome.signal
-        if signal is None or signal.bar_index >= 0 or signal.bar_time is not None:
+        if signal is None:
+            return
+        if signal.bar_index >= 0 and signal.bar_time is not None:
+            return
+        if signal.bar_time is not None:
             return
 
-        # Recovered from the bars, not invented. `_bar_index` wants the engine's own
-        # attribute, which is what is missing, so the index comes from the series
-        # position and the time from its last element.
+        # From here on the time is missing. Recovered from the bars, not invented.
+        if signal.bar_index >= 0:
+            recovered = _bar_time_at(bars, signal.bar_index)
+            if recovered is None:
+                self._log.warning(
+                    Event.SIGNAL_REJECTED,
+                    symbol=signal.symbol,
+                    signal_id=signal.signal_id,
+                    reason="SIGNAL_BAR_UNKNOWN",
+                    explanation=(
+                        f"the engine reported bar index {signal.bar_index} but no bar time, "
+                        "and the bar series supplied to the engine carries no readable time "
+                        "at that index either, so this reading cannot be dated to its bar. "
+                        "Its identity was left untouched rather than dated with another "
+                        "bar's time."
+                    ),
+                )
+                return
+            self._log.warning(
+                Event.SIGNAL_REJECTED,
+                symbol=signal.symbol,
+                signal_id=signal.signal_id,
+                reason="SIGNAL_BAR_RECOVERED",
+                bar_index=signal.bar_index,
+                bar_time=recovered,
+                explanation=(
+                    "the engine reported a bar index but no bar time, so the time was "
+                    "recovered from the bar at that index in the series the analysis "
+                    "actually ran on -- the bar the reading was made on, not the newest "
+                    "bar."
+                ),
+            )
+            object.__setattr__(signal, "bar_time", recovered)
+            self._rehash(signal)
+            return
+
+        # Both missing: `_bar_index` wants the engine's own attribute, which is
+        # what is missing, so the index comes from the series position and the
+        # time from its last element.
         index, close_time = _newest_bar(bars)
         if index is None and close_time is None:
             self._log.warning(
@@ -257,6 +311,30 @@ class AlBrooksSignalSource:
             object.__setattr__(signal, "bar_index", index)
         if close_time is not None:
             object.__setattr__(signal, "bar_time", close_time)
+        self._rehash(signal)
+
+    @staticmethod
+    def _rehash(signal: Signal) -> None:
+        """Recompute ``signal_id`` from the (repaired) identity fields.
+
+        The id is a deterministic hash of symbol, timeframe, bar, action,
+        direction and setup. Repairing the bar without re-hashing would leave the
+        ledger key exactly as bar-less as before -- the collision this guard
+        exists to close, preserved in the one field the ledger actually reads.
+        """
+        object.__setattr__(
+            signal,
+            "signal_id",
+            compute_signal_id(
+                symbol=signal.symbol,
+                timeframe=signal.timeframe,
+                bar_index=signal.bar_index,
+                bar_time=signal.bar_time,
+                action=signal.action,
+                direction=signal.direction,
+                setup_id=signal.setup_id,
+            ),
+        )
 
     def latest_signal(self, symbol: str, timeframe: str) -> Signal | None:
         """The most recent signal, or ``None`` when there is nothing to trade.
@@ -383,6 +461,55 @@ def _analyzable_bars(bars: object) -> object:
     return series
 
 
+def _raw_time_of(bar: object) -> float | None:
+    """The bar's time as a float epoch, or ``None`` when it carries none.
+
+    Mappings are read by key, objects by attribute -- the engine's own bars answer
+    both, a plain dict only the first. Booleans and non-numeric values are not
+    times: ``isinstance(True, int)`` is true, so a naive check would date a bar to
+    1970.
+    """
+    raw_time = bar.get("time") if isinstance(bar, Mapping) else getattr(bar, "time", None)
+    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+        return float(raw_time)
+    return None
+
+
+def _series_len(bars: object) -> int | None:
+    """Length of a bar series, or ``None`` when ``bars`` is not a series.
+
+    Strings, bytes and mappings are not series even though they have a length: a
+    feed that returned a bare string must not be read as "index N". Anything
+    without a length (a generator, ``None``) is refused the same way.
+    """
+    if isinstance(bars, (str, bytes, bytearray, Mapping)):
+        return None
+    try:
+        return len(bars)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+
+
+def _bar_time_at(bars: object, index: int) -> float | None:
+    """The time of the bar at ``index``, or ``None`` when it cannot be read.
+
+    Used when the engine reported an index but no time: the reading was made on
+    the indexed bar, so its time -- and no other bar's -- is the repair. A
+    missing or unreadable time is ``None`` rather than a neighbouring bar's,
+    because dating a reading with another bar's time would be a fabrication.
+    """
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        return None
+    n = _series_len(bars)
+    if n is None or index >= n:
+        return None
+    try:
+        bar = bars[index]  # type: ignore[index]
+    except (TypeError, IndexError, KeyError):
+        return None
+    return _raw_time_of(bar)
+
+
 def _newest_bar(bars: object) -> tuple[int | None, float | None]:
     """The index and close time of the newest bar in a series.
 
@@ -390,29 +517,29 @@ def _newest_bar(bars: object) -> tuple[int | None, float | None]:
     report is exactly what is missing, and the series is what it was given. So this
     is a recovery, not a guess -- and when both are absent the caller refuses.
 
+    Accepts any sized, indexable series -- a list, a tuple, or the engine's own
+    ``BarSeries`` (which is a ``Sequence`` but neither a list nor a tuple, and is
+    what the adapter actually hands the analyzer after unwrapping the frozen
+    transport type). A string or mapping is not a series and is refused.
+
     The index is the position from the end rather than from the start, because the
     engine indexes bars that way and the two must agree: the newest bar in a
     300-bar window is ``299``, not ``0``. A recovery that disagreed with the engine's
     own convention would put the reading on a bar the engine never saw, which is
     worse than refusing.
     """
-    if not isinstance(bars, (list, tuple)) or not bars:
+    n = _series_len(bars)
+    if n is None or n == 0:
+        return None, None
+    try:
+        newest = bars[-1]  # type: ignore[index]
+    except (TypeError, IndexError, KeyError):
         return None, None
 
-    newest = bars[-1]
-    index = len(bars) - 1
+    index = n - 1
     if isinstance(newest, Mapping):
         raw_index = newest.get("index")
         if isinstance(raw_index, int) and not isinstance(raw_index, bool):
             index = raw_index
-        raw_time = newest.get("time")
-    else:
-        raw_time = getattr(newest, "time", None)
 
-    close: float | None
-    if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
-        close = float(raw_time)
-    else:
-        close = None
-
-    return index, close
+    return index, _raw_time_of(newest)

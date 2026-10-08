@@ -119,6 +119,151 @@ class TestTheRecovery:
         assert signal.bar_index == -1
 
 
+class TestTimeOnlyRecovery:
+    """The live 2026-10-08 case: ``bar_index=298`` reported, ``bar_time=None``.
+
+    The mapper falls back to ``bar_time=None`` when the engine's per-bar records
+    carry no timestamp (the engine never wrote one there), while ``bar_index``
+    comes from ``last_closed_bar`` and is present. The old guard only repaired a
+    signal missing *both* halves, so this exact shape passed through untouched.
+    """
+
+    def test_a_reported_index_gets_its_own_bar_time(self) -> None:
+        signal = _signal(bar_index=298, bar_time=None)
+        _guard(signal, _bars(300, time=1727740800.0))
+        assert signal.bar_index == 298
+        assert signal.bar_time == pytest.approx(1727740800.0 + 298)
+
+    def test_the_time_comes_from_the_indexed_bar_not_the_newest(self) -> None:
+        # Dating the reading with the newest bar's time when the engine analysed
+        # an earlier one would be a fabrication, not a repair: wall-clock,
+        # `observed_at` and "an arbitrary previous bar" are all explicitly out.
+        signal = _signal(bar_index=5, bar_time=None)
+        _guard(signal, _bars(300, time=1727740800.0))
+        assert signal.bar_time == pytest.approx(1727740800.0 + 5)
+        assert signal.bar_time != 1727740800.0 + 299
+
+    def test_an_unreadable_time_at_the_index_leaves_the_signal_untouched(self) -> None:
+        # Genuinely unavailable means refused, not borrowed from next door: a
+        # neighbouring bar's time would be a timestamp the analysed bar never had.
+        signal = _signal(bar_index=5, bar_time=None)
+        bars = _bars(300, time=1727740800.0)
+        bars[5] = type("Bar", (), {"time": None})()
+        _guard(signal, bars)
+        assert signal.bar_index == 5
+        assert signal.bar_time is None
+
+    def test_an_out_of_range_index_leaves_the_signal_untouched(self) -> None:
+        signal = _signal(bar_index=999, bar_time=None)
+        _guard(signal, _bars(300, time=1727740800.0))
+        assert signal.bar_index == 999
+        assert signal.bar_time is None
+
+    def test_a_repaired_identity_rehashes_the_signal_id(self) -> None:
+        # The id hashes the bar. Repairing the fields without re-hashing would
+        # leave the ledger key exactly as bar-less as before -- the collision
+        # this guard exists to close, preserved in the one field the ledger reads.
+        from signal_to_trade_bridge.adapters.albrooks.identity import compute_signal_id
+
+        signal = _signal(bar_index=5, bar_time=None)
+        _guard(signal, _bars(300, time=1727740800.0))
+        assert signal.bar_time is not None
+        assert signal.signal_id == compute_signal_id(
+            symbol=signal.symbol,
+            timeframe=signal.timeframe,
+            bar_index=signal.bar_index,
+            bar_time=signal.bar_time,
+            action=signal.action,
+            direction=signal.direction,
+            setup_id=signal.setup_id,
+        )
+
+    def test_a_both_missing_repair_rehashes_the_signal_id(self) -> None:
+        from signal_to_trade_bridge.adapters.albrooks.identity import compute_signal_id
+
+        signal = _signal(bar_index=-1, bar_time=None)
+        _guard(signal, _bars(300, time=1727740800.0))
+        assert signal.signal_id == compute_signal_id(
+            symbol=signal.symbol,
+            timeframe=signal.timeframe,
+            bar_index=signal.bar_index,
+            bar_time=signal.bar_time,
+            action=signal.action,
+            direction=signal.direction,
+            setup_id=signal.setup_id,
+        )
+
+    def test_a_complete_signal_keeps_its_original_id(self) -> None:
+        # The guard must not rewrite an identity the engine already dated: the
+        # engine's own value is the authority.
+        signal = _signal(bar_index=42, bar_time=1234.0)
+        before = signal.signal_id
+        _guard(signal, _bars())
+        assert signal.signal_id == before
+
+
+class TestEngineSeriesShapes:
+    """The real adapter hands the guard a ``BarSeries``, not a list.
+
+    After unwrapping the frozen transport type the bars are the engine's own
+    ``Sequence`` -- neither ``list`` nor ``tuple``. A helper that only reads
+    those two recovers nothing on the live path and the guard silently refuses.
+    """
+
+    def test_newest_bar_reads_a_generic_sequence(self) -> None:
+        from collections.abc import Sequence
+
+        class FakeSeries(Sequence):  # minimal stand-in for the engine's BarSeries
+            def __init__(self, times: list[float]) -> None:
+                self._bars = [{"index": i, "time": t} for i, t in enumerate(times)]
+
+            def __len__(self) -> int:
+                return len(self._bars)
+
+            def __getitem__(self, idx: int | slice) -> Any:  # type: ignore[override]
+                return self._bars[idx]
+
+        series = FakeSeries([100.0, 200.0, 300.0])
+        assert _newest_bar(series) == (2, 300.0)
+
+    def test_time_at_reads_a_generic_sequence_at_the_reported_index(self) -> None:
+        from collections.abc import Sequence
+
+        from signal_to_trade_bridge.adapters.albrooks.source import _bar_time_at
+
+        class FakeSeries(Sequence):
+            def __init__(self, times: list[float]) -> None:
+                self._bars = [{"time": t} for t in times]
+
+            def __len__(self) -> int:
+                return len(self._bars)
+
+            def __getitem__(self, idx: int | slice) -> Any:  # type: ignore[override]
+                return self._bars[idx]
+
+        series = FakeSeries([100.0, 200.0, 300.0])
+        assert _bar_time_at(series, 0) == 100.0
+        assert _bar_time_at(series, 2) == 300.0
+        assert _bar_time_at(series, 3) is None
+
+    def test_guard_recovers_time_from_a_generic_sequence(self) -> None:
+        from collections.abc import Sequence
+
+        class FakeSeries(Sequence):
+            def __init__(self, n: int, time: float) -> None:
+                self._bars = [type("Bar", (), {"time": time + i})() for i in range(n)]
+
+            def __len__(self) -> int:
+                return len(self._bars)
+
+            def __getitem__(self, idx: int | slice) -> Any:  # type: ignore[override]
+                return self._bars[idx]
+
+        signal = _signal(bar_index=10, bar_time=None)
+        _guard(signal, FakeSeries(300, 1727740800.0))
+        assert signal.bar_time == pytest.approx(1727740800.0 + 10)
+
+
 class TestTheRefusal:
     def test_an_empty_series_leaves_the_signal_alone(self) -> None:
         # Nothing to recover from. The signal keeps its degenerate identity, and
