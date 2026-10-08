@@ -19,6 +19,7 @@ object that cannot be serialised cannot be logged, journalled or replayed.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -37,6 +38,7 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionResult",
     "PositionSize",
+    "PreSubmitDelay",
     "RiskBudget",
     "RiskParameters",
     "Signal",
@@ -610,6 +612,77 @@ class RiskParameters:
             "allowed_symbols": sorted(self.allowed_symbols),
             "max_spread": str(self.max_spread) if self.max_spread is not None else None,
             "max_open_positions": self.max_open_positions,
+        }
+
+
+#: The longest pre-submit pause the bridge will accept as configuration, in
+#: milliseconds. One hour: a sanity bound against a unit mistake (seconds typed
+#: as milliseconds), not a recommended value. Anything above it is refused at
+#: construction rather than slept through.
+MAX_PRE_SUBMIT_DELAY_MS = 3_600_000
+
+
+@dataclass(frozen=True, slots=True)
+class PreSubmitDelay:
+    """A bounded random pause before the final order-submission click.
+
+    UI pacing for the submission workflow, nothing more: after the order is
+    fully prepared and validated, the executor waits a freshly rolled duration
+    before handing the order to the submission workflow. It does not change the
+    trading decision, the prices, or the volume -- only when the handoff
+    happens.
+
+    It is deliberately **not** a mechanism for evading broker or platform
+    automation controls: no mouse movement, no fake input, no timing anywhere
+    else. Just one configurable pause, in one place, that is logged when taken.
+
+    Disabled by default, so a fresh checkout behaves exactly as before.
+    """
+
+    #: Master switch. ``False`` means no pause is ever taken.
+    enabled: bool = False
+    #: Inclusive lower bound of the rolled pause, in milliseconds.
+    min_ms: int = 1000
+    #: Inclusive upper bound of the rolled pause, in milliseconds.
+    max_ms: int = 5000
+
+    def __post_init__(self) -> None:
+        for name in ("min_ms", "max_ms"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer number of milliseconds, got {value!r}")
+        if self.min_ms < 0:
+            raise ValueError(f"min_ms cannot be negative, got {self.min_ms}")
+        if self.max_ms < self.min_ms:
+            raise ValueError(
+                f"max_ms ({self.max_ms}) cannot be below min_ms ({self.min_ms}); "
+                "a range with no values in it would make every submission wait forever"
+            )
+        if self.max_ms > MAX_PRE_SUBMIT_DELAY_MS:
+            raise ValueError(
+                f"max_ms ({self.max_ms}) exceeds the sanity bound of "
+                f"{MAX_PRE_SUBMIT_DELAY_MS} ms (one hour); check for a seconds-versus-"
+                "milliseconds mistake"
+            )
+
+    def roll_ms(self, rng: random.Random) -> int | None:
+        """A fresh pause duration in milliseconds, or ``None`` when disabled.
+
+        Inclusive on both ends: ``randint(min_ms, max_ms)``. A plain PRNG is
+        used rather than a cryptographic one because this is UI pacing, not
+        security -- unpredictability beyond a uniform draw buys nothing here.
+        The generator is injected rather than global so a test can seed it and
+        get a reproducible draw.
+        """
+        if not self.enabled:
+            return None
+        return rng.randint(self.min_ms, self.max_ms)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "min_ms": self.min_ms,
+            "max_ms": self.max_ms,
         }
 
 

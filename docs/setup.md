@@ -108,6 +108,35 @@ do not need to change anything to run the tests.
 in it**. The bridge does not need a broker password — see
 [the note at the end of `.env.example](../.env.example).
 
+### Optional: pre-submit pause and order comment
+
+Two execution/UI settings, both off by default so a fresh checkout behaves
+exactly as before:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BRIDGE_PRE_SUBMIT_DELAY_ENABLED` | `false` | Take a random pause before the final submission click. |
+| `BRIDGE_PRE_SUBMIT_DELAY_MIN_MS` | `1000` | Inclusive lower bound of the pause, in milliseconds. |
+| `BRIDGE_PRE_SUBMIT_DELAY_MAX_MS` | `5000` | Inclusive upper bound of the pause, in milliseconds. |
+| `BRIDGE_ORDER_COMMENT_ENABLED` | `false` | Fill the order comment with the bridge's own value instead of leaving it empty. |
+
+The pause happens after the order is fully prepared and validated, immediately
+before the order is handed to the submission workflow -- never during control
+discovery, between field entries, or after submission. Each submission rolls a
+fresh integer duration within the bounds, and the rolled value is logged with
+the signal id (`PRE_SUBMIT_DELAY_APPLIED`). A plain uniform draw is used
+because this is UI pacing, not security. `MIN_MS` must be `>= 0`,
+`MAX_MS` must be `>= MIN_MS`, and anything above one hour is refused as a
+probable seconds-versus-milliseconds mistake. Previews (`--what-if`) and dry
+runs record the pause that would have applied without waiting.
+
+The comment value, when enabled, is the existing `stb SYMBOL LONG/SHORT
+setup-id` line (at most 64 characters, no risk figures). When disabled the
+comment field is submitted empty, which the terminal accepts as-is.
+
+Neither setting is a mechanism for evading broker or platform automation
+controls. They are UI pacing and labelling, and are documented as such.
+
 ---
 
 ## 5. Use it from the command line

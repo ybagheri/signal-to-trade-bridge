@@ -213,7 +213,7 @@ def _auto_trade_bindings(supplied: AutoTradeBindings | None) -> AutoTradeBinding
         return None
 
 
-def recording_executor() -> Any:
+def recording_executor(pre_submit_delay: Any | None = None) -> Any:
     """A :class:`~signal_to_trade_bridge.ports.TradeExecutor` that records instead of trading.
 
     **Here, in the composition root, because that is the only layer allowed to know
@@ -224,10 +224,14 @@ def recording_executor() -> Any:
     production path, and the rule is worth more than the convenience.
 
     So the wiring asks here, and the CLI just says "give me something that records".
+
+    :param pre_submit_delay: the pause policy the recorder mirrors. A preview
+        records the pause the real executor would have taken -- without taking
+        it, because a preview that slept would be UI pacing with no UI.
     """
     from signal_to_trade_bridge.adapters.fake.executor import FakeTradeExecutor
 
-    return FakeTradeExecutor()
+    return FakeTradeExecutor(pre_submit_delay=pre_submit_delay)
 
 
 def resolve_ledger(config: BridgeConfig, bindings: AutoTradeBindings | None) -> Any:

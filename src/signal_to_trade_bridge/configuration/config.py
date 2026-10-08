@@ -29,7 +29,7 @@ from typing import Any
 
 from signal_to_trade_bridge.domain.enums import TakeProfitSource
 from signal_to_trade_bridge.domain.errors import ConfigurationError
-from signal_to_trade_bridge.domain.models import RiskParameters
+from signal_to_trade_bridge.domain.models import PreSubmitDelay, RiskParameters
 
 __all__ = [
     "BRIDGE_ENV_PREFIX",
@@ -240,6 +240,13 @@ class BridgeConfig:
     execution_enabled: bool = False
     #: Produce the full decision, log it, and stop before the executor.
     dry_run: bool = True
+    #: The bounded random pause before the final submission click. Disabled by
+    #: default, so a fresh checkout submits exactly as before.
+    pre_submit_delay: PreSubmitDelay = field(default_factory=PreSubmitDelay)
+    #: Whether the order comment field carries the bridge's own comment value.
+    #: ``False`` (the default) submits an empty comment; ``True`` uses
+    #: :func:`~signal_to_trade_bridge.application.dry_run.default_comment`.
+    order_comment_enabled: bool = False
     #: The terminal must already be running and logged in. The bridge never
     #: launches it, because a process that starts a trading terminal on import is
     #: a process that can start it by accident.
@@ -320,6 +327,8 @@ class BridgeConfig:
         return (
             f"BridgeConfig(execution_enabled={self.execution_enabled}, "
             f"dry_run={self.dry_run}, "
+            f"pre_submit_delay={self.pre_submit_delay.to_dict()}, "
+            f"order_comment_enabled={self.order_comment_enabled}, "
             f"risk_percent={self.risk_percent}, "
             f"reward_risk_ratio={self.reward_risk_ratio}, "
             f"take_profit_source={self.take_profit_source.value}, "
@@ -395,11 +404,27 @@ def config_from_env(*, env_file: Path | None = None, apply: bool = True) -> Brid
         # happened to notice first.
         raise ConfigurationError(str(exc)) from exc
 
+    # Read before the `try`: `_int` raises `ConfigurationError` (not `ValueError`)
+    # on garbage, so there is nothing to convert -- and the values must not go
+    # through an `or default` idiom, because a configured `0` is falsy and a
+    # zero-millisecond lower bound is legitimate. The asserts hold because a
+    # non-None default guarantees a non-None return.
+    pre_submit_min_ms = _int(f"{p}PRE_SUBMIT_DELAY_MIN_MS", 1000)
+    assert pre_submit_min_ms is not None
+    pre_submit_max_ms = _int(f"{p}PRE_SUBMIT_DELAY_MAX_MS", 5000)
+    assert pre_submit_max_ms is not None
+
     try:
         return BridgeConfig(
             risk=risk,
             execution_enabled=_flag(f"{p}EXECUTION_ENABLED", False),
             dry_run=_flag(f"{p}DRY_RUN", True),
+            pre_submit_delay=PreSubmitDelay(
+                enabled=_flag(f"{p}PRE_SUBMIT_DELAY_ENABLED", False),
+                min_ms=pre_submit_min_ms,
+                max_ms=pre_submit_max_ms,
+            ),
+            order_comment_enabled=_flag(f"{p}ORDER_COMMENT_ENABLED", False),
             require_running_terminal=_flag(f"{p}REQUIRE_RUNNING_TERMINAL", True),
             log_directory=_path(f"{p}LOG_DIR", Path("logs")) or Path("logs"),
             mt5_terminal_path=_path(f"{p}MT5_TERMINAL_PATH", None),

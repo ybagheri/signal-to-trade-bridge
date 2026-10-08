@@ -65,6 +65,8 @@ the structural test asserting it is the enforcement.
 
 from __future__ import annotations
 
+import random
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -74,8 +76,14 @@ from signal_to_trade_bridge.adapters.auto_trade.bindings import (
     AutoTradeUnavailable,
     load_bindings,
 )
+from signal_to_trade_bridge.application.pre_submit import roll_delay_ms
 from signal_to_trade_bridge.domain.enums import Direction
-from signal_to_trade_bridge.domain.models import ExecutionRequest, ExecutionResult
+from signal_to_trade_bridge.domain.models import (
+    ExecutionRequest,
+    ExecutionResult,
+    PreSubmitDelay,
+)
+from signal_to_trade_bridge.infrastructure.logging import Event, get_logger
 
 if TYPE_CHECKING:
     from signal_to_trade_bridge.adapters.mt5.execution_mode import TradeModeSource
@@ -108,6 +116,10 @@ class AutoTradeExecutor:
         mt5_bindings: TradeModeSource | None = None,
         kill_switch: KillSwitch | None = None,
         now: Callable[[], datetime] | None = None,
+        pre_submit_delay: PreSubmitDelay | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        rng: random.Random | None = None,
+        logger: Any | None = None,
     ) -> None:
         """
         :param workflow: an already-assembled ``ExecutionWorkflow``. **Injected,
@@ -132,12 +144,25 @@ class AutoTradeExecutor:
             workflow checks the same state internally; this is the outer layer,
             and it exists so the refusal is ours and not only theirs.
         :param now: injectable clock, so a test can pin the signal timestamp.
+        :param pre_submit_delay: the bounded random pause taken after the order
+            is fully prepared and immediately before the submission workflow
+            runs. ``None`` (the default) means no pause, exactly as before.
+        :param sleeper: what the pause waits on. ``time.sleep`` in production;
+            injected in tests so the suite never actually waits.
+        :param rng: the draw for the pause duration. A private instance by
+            default; injected (seeded) in tests for a reproducible draw.
+        :param logger: where the taken pause is recorded. Silent when the
+            policy is disabled.
         """
         self._workflow = workflow
         self._bindings = bindings
         self._mt5_bindings = mt5_bindings
         self._kill_switch = kill_switch
         self._now = now or (lambda: datetime.now(UTC))
+        self._pre_submit_delay = pre_submit_delay
+        self._sleeper = sleeper or time.sleep
+        self._rng = rng or random.Random()
+        self._log = logger or get_logger("adapters.auto_trade")
 
     def submit(self, request: ExecutionRequest) -> ExecutionResult:
         """Send one order and report what happened.
@@ -193,6 +218,14 @@ class AutoTradeExecutor:
                 message=refusal,
             )
 
+        # The pre-submit pause, and only here: every bridge-side refusal above
+        # has already had its say, so a pause taken here is never spent on an
+        # order that will not go out -- and no UI action has started yet, since
+        # `workflow.execute` is the first call that touches the terminal. That
+        # is what makes this "after preparation, before submission" rather than
+        # a pause held while a half-filled dialog sits open.
+        self._pause_before_submit(request)
+
         try:
             outcome = self._workflow.execute(signal)
         except Exception as exc:
@@ -242,6 +275,25 @@ class AutoTradeExecutor:
                 "loss cannot be confirmed as one that would actually be sent. Refusing "
                 "rather than opening a position that may have no stop."
             )
+
+    def _pause_before_submit(self, request: ExecutionRequest) -> int | None:
+        """Wait out the configured pre-submit pause, if one is configured.
+
+        Returns the milliseconds waited, or ``None`` when no pause was taken.
+        The duration is rolled fresh per submission within the configured
+        bounds, and logged with the signal id -- a pause nobody can see in the
+        log is indistinguishable from one that never happened.
+        """
+        delay_ms = roll_delay_ms(self._pre_submit_delay, self._rng)
+        if delay_ms is None:
+            return None
+        self._log.event(
+            Event.PRE_SUBMIT_DELAY_APPLIED,
+            signal_id=request.signal_id,
+            delay_ms=delay_ms,
+        )
+        self._sleeper(delay_ms / 1000.0)
+        return delay_ms
 
     def _to_signal(self, request: ExecutionRequest, bindings: AutoTradeBindings) -> Any:
         """The bridge's request as an upstream ``TradeSignal``.
