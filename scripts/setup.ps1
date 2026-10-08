@@ -62,7 +62,7 @@ Write-Step 'Checking Python'
 $python = $null
 foreach ($candidate in @('python', 'py')) {
     try {
-        $version = & $candidate -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>$null
+        $version = & $candidate -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
         if ($LASTEXITCODE -eq 0) { $python = $candidate; $pythonVersion = $version; break }
     }
     catch { continue }
