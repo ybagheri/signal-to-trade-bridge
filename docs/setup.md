@@ -137,6 +137,23 @@ comment field is submitted empty, which the terminal accepts as-is.
 Neither setting is a mechanism for evading broker or platform automation
 controls. They are UI pacing and labelling, and are documented as such.
 
+### Two pauses, two layers
+
+The execution project (`auto-trade`) has its own complementary pause,
+`AUTO_TRADE_PRE_SUBMIT_DELAY_*`, taken *inside* the order dialog between the
+final verification (`confirm_dialog_matches`) and the final click. The two
+are independent mechanisms with independent configuration:
+
+| Layer | Variable prefix | Pause point |
+|---|---|---|
+| bridge | `BRIDGE_PRE_SUBMIT_DELAY_*` | after all bridge refusals, before the submission workflow runs (no UI state held) |
+| `auto-trade` | `AUTO_TRADE_PRE_SUBMIT_DELAY_*` | inside the dialog, after verification, before the click |
+
+With both enabled, a real order waits twice -- two independent rolls, so the
+total pause is their sum. Previews (`--what-if`) only ever exercise the
+bridge layer: the recorder replaces the executor, the upstream workflow never
+runs, and the intra-dialog pause never applies.
+
 ---
 
 ## 5. Use it from the command line
