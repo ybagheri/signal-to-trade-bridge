@@ -3363,6 +3363,15 @@ Two execution/UI settings, both off by default; default behavior unchanged.
 - Validation fails loudly: negative min, max < min, non-integers, and anything
   above one hour (`MAX_PRE_SUBMIT_DELAY_MS`) are refused at construction;
   `MIN_MS=0` is legitimate and survives env loading (no `or`-default).
+- Note (2026-10-08, after the bridge change): `auto-trade` gained its own
+  complementary intra-dialog pause (`AUTO_TRADE_PRE_SUBMIT_DELAY_*`,
+  `3cbb6c2`), taken between `confirm_dialog_matches` and `click_final_control`.
+  The two pauses are independent (separate env prefixes, separate rolls); with
+  both enabled a real order waits twice. `--what-if` only exercises the bridge
+  layer, so the intra-dialog pause never applies in previews. Documented in
+  `docs/setup.md` ("Two pauses, two layers"). `E:\auto-trade` itself was never
+  touched from this repo; verified read-only (`git status` clean there except
+  its own commits).
 - New files: `application/pre_submit.py`, `tests/unit/test_pre_submit.py`.
   Touched: `domain/models.py` (`PreSubmitDelay`), `configuration/config.py`,
   `adapters/auto_trade/executor.py`, `adapters/fake/executor.py`,
