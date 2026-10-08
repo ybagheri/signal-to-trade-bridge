@@ -66,3 +66,11 @@ desktop.ini
 # Build output of the packaging scripts
 .build/
 dist-info/
+
+# Local live-verification signal files. Generated from the running terminal
+# during manual verification (fresh-signal.json, fresh-structural-signal*.json,
+# demo-test-001.json, example-buy.json). They record one moment of the market,
+# not the project, so they stay local and out of commits.
+fresh-*.json
+demo-test-*.json
+example-buy.json
