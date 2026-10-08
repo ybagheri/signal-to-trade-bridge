@@ -178,16 +178,16 @@ class TestWhatIf:
     ) -> None:
         # `--what-if` replaces the final executor with a recorder, so it sends
         # nothing and must not require the acknowledgement that guards sending.
-        # The assertion is that the *confirmation* refusal is gone and the next
-        # gate is reached: with execution left disabled the command must refuse
-        # on the configuration, proving it proceeded past the confirmation gate
-        # rather than being waved through entirely.
+        # Nor is it gated on an armed configuration: with execution left
+        # disabled it must proceed past *both* the confirmation and the
+        # configuration gates and stop at the machine gate instead -- here the
+        # missing terminal path, which no configuration can clear.
         _isolated(monkeypatch, tmp_path)
         code, output = _run("trade", str(signal_file), "--what-if")
-        assert code == EXIT_REFUSED
+        assert code == EXIT_FAULT
         assert "needs --confirm-demo" not in output
-        assert "BRIDGE_EXECUTION_ENABLED is false" in output
-        assert "no order was sent" in output
+        assert "configuration forbids" not in output
+        assert "BRIDGE_MT5_TERMINAL_PATH" in output
 
 
 class TestTheCommandSurface:

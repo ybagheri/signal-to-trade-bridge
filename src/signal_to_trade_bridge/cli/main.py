@@ -50,9 +50,11 @@ again.
     Added in Phase 14, and gated three ways: ``--confirm-demo`` must be given, the
     account must be a demo account, and the configuration must already have
     execution enabled and dry-run off. Any one of them missing is a refusal.
-    ``--what-if`` is the exception to the first gate: it builds the same live
-    wiring but replaces the final executor with a recorder, so it sends nothing
-    and needs no ``--confirm-demo``.
+    ``--what-if`` is the exception to the first two gates: it builds the same
+    live wiring from an in-memory armed copy of the configuration -- so it works
+    with the safe defaults -- but replaces the final executor with a recorder
+    before the signal is processed, so it sends nothing and needs neither
+    ``--confirm-demo`` nor an armed configuration.
 
 ``config``
     Print the effective configuration. Nothing in it is a secret, and none of it is
@@ -76,8 +78,10 @@ they had not done. That is the same reasoning as ``auto-trade execute
 --confirm-demo``, and it is why the flag exists at all: the point is not to make
 the order hard, it is to make the *intent* explicit at the moment it happens.
 ``--what-if`` previews the live wiring with the final executor replaced by a
-recorder, so it sends nothing and is exempt from the third permission only --
-the configuration and control-identifier gates still apply.
+recorder, so it sends nothing and is exempt from the confirmation flag and the
+configuration gates -- it works with the safe defaults. The terminal,
+control-identifier, ledger, kill-switch and risk gates still apply, and the
+recorder substitution is what keeps it from sending.
 """
 
 from __future__ import annotations
@@ -744,7 +748,9 @@ def _trade(args: argparse.Namespace) -> _Outcome:
 
     1. ``--confirm-demo`` on the command line (not required with ``--what-if``,
        which replaces the final executor with a recorder and sends nothing)
-    2. ``execution_enabled`` and not ``dry_run`` in the configuration
+    2. ``execution_enabled`` and not ``dry_run`` in the configuration (likewise
+       not required with ``--what-if``, which assembles from an in-memory armed
+       copy and still sends nothing)
     3. a terminal whose control identifiers were measured on its own build
 
     Number 1 is first and it is a flag, because it is the only one that proves a
@@ -752,9 +758,9 @@ def _trade(args: argparse.Namespace) -> _Outcome:
     will trade the next time anything calls the live path; a flag has to be typed
     every time, which is the property that makes the difference between "the system
     is configured to trade" and "somebody asked for a trade". ``--what-if`` is
-    exempt from number 1 only: it still builds the live side and still faces
-    gates 2 and 3, and the recorder substitution below is what keeps it from
-    sending.
+    exempt from numbers 1 and 2: it still builds the live side and still faces
+    gate 3 with the real ledger, kill switch and risk wiring, and the recorder
+    substitution below is what keeps it from sending.
 
     ``--what-if`` does everything except the click: it builds the live side, runs the
     signal through it, and prints the decision including the volume and the prices.
@@ -788,10 +794,16 @@ def _trade(args: argparse.Namespace) -> _Outcome:
         return _Outcome(EXIT_FAULT, f"ERROR: {args.signal} is not a usable signal: {exc}")
 
     config = _config_from_env(args)
+    what_if = getattr(args, "what_if", False)
 
     # The configuration gate, reported before the machine gate, because it is the
     # one an operator can have forgotten about and `config` will confirm.
-    if config.dry_run or not config.execution_enabled:
+    # `--what-if` is exempt: it assembles the same live wiring from an in-memory
+    # armed copy (below) so the preview sees what an order would see. The thing
+    # that keeps it from sending is the recorder swap, not the configuration --
+    # a preview that refused on safe defaults would be a preview unavailable
+    # exactly when it is most needed.
+    if not what_if and (config.dry_run or not config.execution_enabled):
         missing = []
         if not config.execution_enabled:
             missing.append("BRIDGE_EXECUTION_ENABLED is false")
@@ -821,8 +833,22 @@ def _trade(args: argparse.Namespace) -> _Outcome:
         )
 
     try:
+        # `--what-if` builds from an in-memory armed copy of the configuration.
+        # Two reasons it cannot use the effective one as-is: `build_live`
+        # refuses a safe configuration, and `ProcessSignal` only reaches the
+        # executor when its own config is armed -- with safe defaults the
+        # preview would take the dry-run path and the recorder would never see
+        # the request it exists to report. The copy changes nothing on disk and
+        # nothing in `.env`; only the executor swap below decides whether
+        # anything can be sent, and the swap replaces the real executor before
+        # the signal is processed.
+        live_config = (
+            dataclasses.replace(config, execution_enabled=True, dry_run=False)
+            if what_if
+            else config
+        )
         bridge = build_live(
-            config,
+            live_config,
             terminal=config.mt5_terminal_path,
             data_path=config.mt5_data_path,
         )
