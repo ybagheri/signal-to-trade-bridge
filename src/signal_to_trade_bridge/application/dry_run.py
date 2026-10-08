@@ -86,7 +86,9 @@ __all__ = [
 ]
 
 
-def build_execution_request(intent: TradeIntent) -> ExecutionRequest:
+def build_execution_request(
+    intent: TradeIntent, *, comment_enabled: bool = False
+) -> ExecutionRequest:
     """The order this intent would send, as an explicit boundary object.
 
     **The numbers are copied, not recomputed.** ``volume`` is the intent's sized
@@ -103,6 +105,13 @@ def build_execution_request(intent: TradeIntent) -> ExecutionRequest:
     ``TradeSignal.take_profit`` are both optional. **Phase 9 made the field
     optional**, and this function had no branch to remove: the same expression
     serves both cases.
+
+    :param comment_enabled: whether the order carries the bridge's comment
+        value. ``False`` (the default, matching
+        ``BRIDGE_ORDER_COMMENT_ENABLED=false``) submits an empty comment;
+        ``True`` uses :func:`default_comment`. The default is the safe one on
+        purpose: a caller that forgets the flag sends no comment rather than
+        one nobody asked for.
     """
     return ExecutionRequest(
         signal_id=intent.signal.signal_id,
@@ -112,7 +121,7 @@ def build_execution_request(intent: TradeIntent) -> ExecutionRequest:
         entry=intent.entry,
         stop_loss=intent.stop_loss.price,
         take_profit=None if intent.take_profit is None else intent.take_profit.price,
-        comment=default_comment(intent),
+        comment=default_comment(intent) if comment_enabled else "",
         strategy=intent.signal.setup_id or "",
         # Carried for traceability and explicitly not a probability. See
         # `ExecutionRequest.evidence_score`.
@@ -309,6 +318,7 @@ def report_for(
     dry_run: bool,
     ask_downstream: Callable[[ExecutionRequest], DownstreamVerdict] | None = None,
     extra: Mapping[str, Any] | None = None,
+    comment_enabled: bool = False,
 ) -> DryRunReport:
     """Build the report for a validated intent.
 
@@ -329,7 +339,7 @@ def report_for(
     :class:`DryRunReport` because a caller holding a hand-built report should not
     have to prove it is well-formed, but a report built here always has one.
     """
-    request = build_execution_request(intent)
+    request = build_execution_request(intent, comment_enabled=comment_enabled)
 
     if ask_downstream is None:
         downstream = DownstreamVerdict.not_evaluated(

@@ -178,6 +178,80 @@ class TestFailLoudly:
             config_from_env(apply=False)
 
 
+class TestPreSubmitDelayConfig:
+    def test_delay_is_disabled_by_default(self, clean_environment: None) -> None:
+        policy = config_from_env(apply=False).pre_submit_delay
+        assert policy.enabled is False
+        assert policy.min_ms == 1000
+        assert policy.max_ms == 5000
+
+    def test_delay_bounds_are_configurable(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_ENABLED"] = "true"
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MIN_MS"] = "250"
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MAX_MS"] = "2000"
+        policy = config_from_env(apply=False).pre_submit_delay
+        assert policy.enabled is True
+        assert policy.min_ms == 250
+        assert policy.max_ms == 2000
+
+    def test_a_zero_minimum_survives_loading(self, clean_environment: None) -> None:
+        # Zero is falsy, so an `or default` idiom in the loader would silently
+        # replace it with 1000 -- the exact bug `_require_int` exists to prevent
+        # elsewhere in this file.
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MIN_MS"] = "0"
+        assert config_from_env(apply=False).pre_submit_delay.min_ms == 0
+
+    def test_a_negative_minimum_raises(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MIN_MS"] = "-5"
+        with pytest.raises(ConfigurationError, match="min_ms"):
+            config_from_env(apply=False)
+
+    def test_max_below_min_raises(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MAX_MS"] = "500"
+        with pytest.raises(ConfigurationError, match="max_ms"):
+            config_from_env(apply=False)
+
+    def test_a_non_integer_bound_raises(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MIN_MS"] = "one second"
+        with pytest.raises(ConfigurationError, match="is not an integer"):
+            config_from_env(apply=False)
+
+    def test_an_absurd_maximum_raises(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}PRE_SUBMIT_DELAY_MAX_MS"] = "999999999"
+        with pytest.raises(ConfigurationError, match="sanity bound"):
+            config_from_env(apply=False)
+
+
+class TestOrderCommentConfig:
+    def test_comment_is_disabled_by_default(self, clean_environment: None) -> None:
+        assert config_from_env(apply=False).order_comment_enabled is False
+
+    def test_comment_is_configurable(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}ORDER_COMMENT_ENABLED"] = "true"
+        assert config_from_env(apply=False).order_comment_enabled is True
+
+    def test_a_non_boolean_comment_flag_raises(self, clean_environment: None) -> None:
+        import os
+
+        os.environ[f"{BRIDGE_ENV_PREFIX}ORDER_COMMENT_ENABLED"] = "sometimes"
+        with pytest.raises(ConfigurationError, match="is not a boolean"):
+            config_from_env(apply=False)
+
+
 class TestCanExecute:
     def test_dry_run_overrides_the_enable_flag(self) -> None:
         # Ordering, not luck: a configuration with execution enabled and dry run

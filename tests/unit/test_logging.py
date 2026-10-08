@@ -60,6 +60,7 @@ class TestEventVocabulary:
             "DRY_RUN_COMPLETED",
             "EXECUTION_RESULT",
             "DUPLICATE_SUPPRESSED",
+            "PRE_SUBMIT_DELAY_APPLIED",
         }
         assert required <= set(all_events())
 

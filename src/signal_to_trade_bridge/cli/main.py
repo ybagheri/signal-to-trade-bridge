@@ -883,7 +883,7 @@ def _trade(args: argparse.Namespace) -> _Outcome:
         from signal_to_trade_bridge.application.execution_envelope import with_executor
         from signal_to_trade_bridge.composition import recording_executor
 
-        recorder = recording_executor()
+        recorder = recording_executor(live_config.pre_submit_delay)
         # Checked rather than asserted. `build_live` always wires an envelope, but
         # the attribute is typed optional, and a preview flag that raised a TypeError
         # on a build that had not wired one would be a poor way to learn it -- a
@@ -941,6 +941,13 @@ def _trade(args: argparse.Namespace) -> _Outcome:
                 f"    target {request.take_profit if request.take_profit is not None else 'none'}",
                 f"    comment {request.comment!r}",
             ]
+            delays = getattr(recorder, "pre_submit_delays", [])
+            if delays:
+                lines += [
+                    "",
+                    "  the pre-submit pause that would have applied (recorded, not waited):",
+                    f"    {delays[0]} ms",
+                ]
         return _Outcome(
             _decision_code(decision), "\n".join(lines), {"decision": decision.to_dict()}
         )

@@ -20,6 +20,7 @@
 | 12–13 | CLI, public API, documentation, architecture review |
 | 14 | Machine armed on a demo account; first real orders (exposed the One Click defect) |
 | 16 | Test portability (33 failures on a clean machine → 0), personal data removed from the repository, One Click guard wired to the terminal and its mode test corrected, documentation synchronised |
+| — | Configurable pre-submit pause (`BRIDGE_PRE_SUBMIT_DELAY_*`, off by default) taken after all bridge refusals and before `workflow.execute`; order-comment policy (`BRIDGE_ORDER_COMMENT_ENABLED=false` submits an empty comment). Previews record the pause without waiting. |
 
 ## In progress
 

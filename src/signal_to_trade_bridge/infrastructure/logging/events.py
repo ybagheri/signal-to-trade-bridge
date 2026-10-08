@@ -51,6 +51,10 @@ class Event(StrEnum):
     DRY_RUN_COMPLETED = "DRY_RUN_COMPLETED"
     #: The execution layer reported back, with its status mapped.
     EXECUTION_RESULT = "EXECUTION_RESULT"
+    #: A pre-submit pause was taken before handing the order to the submission
+    #: workflow. Carries the rolled duration in milliseconds. Emitted only when
+    #: the pause is enabled -- a disabled policy logs nothing.
+    PRE_SUBMIT_DELAY_APPLIED = "PRE_SUBMIT_DELAY_APPLIED"
     #: A signal was recognised as already acted on and not re-sent.
     DUPLICATE_SUPPRESSED = "DUPLICATE_SUPPRESSED"
     #: The kill switch is engaged, so nothing will be sent regardless of

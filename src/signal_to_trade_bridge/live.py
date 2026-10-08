@@ -412,6 +412,7 @@ def _finish(
         bindings=auto_trade_bindings,
         mt5_bindings=mt5_bindings,
         kill_switch=kill_switch,
+        pre_submit_delay=config.pre_submit_delay,
     )
     pipeline.wire_execution(
         build_execution_envelope(executor=executor, idempotency=ledger, kill_switch=kill_switch)

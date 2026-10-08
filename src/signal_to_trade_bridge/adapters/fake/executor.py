@@ -31,9 +31,15 @@ that does not behave, and an untested failure path here is an untested ``UNKNOWN
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
-from signal_to_trade_bridge.domain.models import ExecutionRequest, ExecutionResult
+from signal_to_trade_bridge.application.pre_submit import roll_delay_ms
+from signal_to_trade_bridge.domain.models import (
+    ExecutionRequest,
+    ExecutionResult,
+    PreSubmitDelay,
+)
 
 __all__ = ["FakeTradeExecutor"]
 
@@ -52,6 +58,20 @@ class FakeTradeExecutor:
     #: value-comparable, so a list of them compares by value.
     submitted: list[ExecutionRequest] = field(default_factory=list)
 
+    #: The pre-submit pause policy to mirror. When enabled, each submission
+    #: rolls and records the pause the real executor would have waited --
+    #: without waiting, because a recorder that slept would make previews and
+    #: tests wait on UI pacing that involves no UI.
+    pre_submit_delay: PreSubmitDelay | None = None
+
+    #: The rolled pauses, in milliseconds, one per submission that would have
+    #: waited. Empty when the policy is absent or disabled.
+    pre_submit_delays: list[int] = field(default_factory=list)
+
+    #: The draw for the recorded pause. Injected (seeded) in tests for a
+    #: reproducible recording.
+    rng: random.Random | None = None
+
     #: The result to return. Set it to simulate an acceptance, a rejection or an
     #: unknown.
     result: ExecutionResult | None = None
@@ -65,6 +85,9 @@ class FakeTradeExecutor:
         if self.error is not None:
             raise self.error
         self.submitted.append(request)
+        delay_ms = roll_delay_ms(self.pre_submit_delay, self.rng or random.Random())
+        if delay_ms is not None:
+            self.pre_submit_delays.append(delay_ms)
         if self.result is not None:
             return self.result
         return ExecutionResult(

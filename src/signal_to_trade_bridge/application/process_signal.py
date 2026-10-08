@@ -348,6 +348,7 @@ class ProcessSignal:
             dry_run=self._config.dry_run,
             ask_downstream=self._ask_downstream,
             extra={"wired": self._envelope is not None},
+            comment_enabled=self._config.order_comment_enabled,
         )
         self._log_dry_run(report)
 
