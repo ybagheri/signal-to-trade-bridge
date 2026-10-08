@@ -170,14 +170,24 @@ class TestWhatIf:
     wrong in the first place.
     """
 
-    def test_it_needs_confirm_demo_too(self, signal_file: Path) -> None:
-        # Deliberate. `--what-if` sends nothing, so requiring the acknowledgement for
-        # it could look like friction -- but a flag that bypasses a permission is a
-        # flag that will be copy-pasted into the command *without* `--what-if` one
-        # day later, and the habit is the thing being protected.
+    def test_it_does_not_need_confirm_demo(
+        self,
+        signal_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # `--what-if` replaces the final executor with a recorder, so it sends
+        # nothing and must not require the acknowledgement that guards sending.
+        # The assertion is that the *confirmation* refusal is gone and the next
+        # gate is reached: with execution left disabled the command must refuse
+        # on the configuration, proving it proceeded past the confirmation gate
+        # rather than being waved through entirely.
+        _isolated(monkeypatch, tmp_path)
         code, output = _run("trade", str(signal_file), "--what-if")
         assert code == EXIT_REFUSED
-        assert "--confirm-demo" in output
+        assert "needs --confirm-demo" not in output
+        assert "BRIDGE_EXECUTION_ENABLED is false" in output
+        assert "no order was sent" in output
 
 
 class TestTheCommandSurface:
