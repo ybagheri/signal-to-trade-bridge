@@ -436,7 +436,7 @@ def abstention_reason(signal: Signal) -> str:
     return ""
 
 
-def _analyzable_bars(bars: object) -> object:
+def _analyzable_bars(bars: object) -> Sequence[Any]:
     """The bars in the shape the analyzer accepts.
 
     ``MT5Feed.closed_bars`` returns a ``FrozenSeries``, while
@@ -454,11 +454,20 @@ def _analyzable_bars(bars: object) -> object:
     than in the engine: the analyzer contract is unchanged, and anything
     already analyzable (a list, a tuple, a ``BarSeries`` -- none of which
     carries a ``series`` attribute) passes through untouched.
+
+    The return type is ``Sequence[Any]`` rather than ``object`` because that is
+    what :class:`AnalyzerLike` declares, and a wider type here would make every
+    call site an unchecked argument for the one call this module makes to the
+    engine. The passthrough branch cannot be *proven* to be a sequence -- the
+    transport type is ``object`` and only the analyzer knows what it accepts --
+    so it is a cast stating that claim rather than a narrowing mypy could
+    verify. ``Analyzer.analyze`` iterates its input, so a non-sequence would
+    fail there loudly rather than silently analyse the wrong thing.
     """
     series = getattr(bars, "series", None)
     if series is None:
-        return bars
-    return series
+        return cast("Sequence[Any]", bars)
+    return cast("Sequence[Any]", series)
 
 
 def _raw_time_of(bar: object) -> float | None:
