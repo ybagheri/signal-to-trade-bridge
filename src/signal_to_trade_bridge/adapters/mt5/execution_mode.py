@@ -13,9 +13,20 @@ Trading** mode, and in that mode `Buy by Market` sends the values from the Toolb
 Trade panel -- a symbol, a volume spinner, and no stop loss at all. That is precisely
 the shape of what came back.
 
-The terminal reports it: ``account_info().trade_mode == 0`` and
-``terminal_info().trade_allowed is False``. Both are read here, with no terminal change
-and no click.
+The terminal reports it: ``terminal_info().trade_allowed is False``. Read here,
+with no terminal change and no click. (An earlier revision also named
+``account_info().trade_mode == 0``; that field is the account type --
+``0`` is a demo account -- not the trading mode, and it never indicated
+anything about One Click. Corrected 2026-10-15.)
+
+**Known limit, established 2026-10-09 on the live demo terminal.** A real order
+went out at the Toolbox panel's defaults (0.01 lots, no stop, no target) with
+``trade_allowed is True``, so this flag does **not** track the failure it was
+written for. The actual cause was upstream: dialog fields written with
+``set_edit_text`` never commit to MT5's order state, and every read-back in the
+path reported the displayed text. Fixed upstream (keystroke writes plus
+commit-witness wait); this guard stays as a cheap pre-click refusal for a
+terminal genuinely in One Click mode, not as the primary protection.
 
 ### What this module does about it
 

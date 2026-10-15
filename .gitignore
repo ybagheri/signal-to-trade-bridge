@@ -73,4 +73,5 @@ dist-info/
 # not the project, so they stay local and out of commits.
 fresh-*.json
 demo-test-*.json
+demo-*.json
 example-buy.json

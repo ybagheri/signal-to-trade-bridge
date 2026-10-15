@@ -32,10 +32,17 @@ The guard refuses any order carrying a stop or target unless
 Remaining, in order (all need a Windows machine, a running **demo** terminal and a
 person watching):
 
-1. Read `terminal_info().trade_allowed` with a read-only probe, with Algo Trading **off**
+1. ~~Read `terminal_info().trade_allowed` with a read-only probe, with Algo Trading **off**
    and then **on**, and record both readings. Confirm the flag actually tracks the
    state that produced the stop-less fills; if it does not, the guard's premise is wrong
-   and must be revisited before anything else.
+   and must be revisited before anything else.~~ **Answered 2026-10-15: the premise
+   is wrong.** A live demo order (ticket 387457709) went out at the panel defaults
+   with `trade_allowed is True`. The cause was never the trading mode: upstream wrote
+   dialog fields with `set_edit_text`, which MT5 never commits (proven with read-only
+   probes 2026-10-15: display updates instantly, MT5's own committed-state labels
+   `10881`/`11138`/`11139` do not move). Fixed upstream — keystroke writes plus a
+   commit-witness wait, with the witness ids joined to the `terminal-check` probe.
+   The guard stays as a cheap pre-click refusal, not the primary protection.
 2. Join `execution_mode` to the `check_control_ids` seam so the terminal is read once,
    from one place.
 3. With Algo Trading still off, send a correctly-formed demo order through
