@@ -87,9 +87,12 @@ None of these touches, or needs, a live terminal.
   Verified by replaying the gate in a throwaway venv here: 1263 passed,
   86 skipped (every skip carries its reason).
 * ~~**Cover the remaining gaps** behind the 93% figure (CLI error paths are the largest)~~
-  **done 2026-10-15 for the CLI: `cli/main.py` is at 100%** (`tests/unit/test_cli_trade_errors.py`
-  pins the trade refusals, the unreadable/unusable signal paths, the unwired-pipeline
-  refusal, and both report blocks). Suite total 98%.
+  **done 2026-10-15 for the CLI and the domain: `cli/main.py` and `domain/models.py`
+  are at 100%** (`tests/unit/test_cli_trade_errors.py` pins the trade refusals, the
+  unreadable/unusable signal paths, the unwired-pipeline refusal, and both report
+  blocks; `tests/unit/test_domain_validation_gaps.py` pins every constructor guard,
+  and a duplicated validation block found on the way was deleted, not tested).
+  Suite total 99%.
 
 ## Later (needs a decision, not just work)
 

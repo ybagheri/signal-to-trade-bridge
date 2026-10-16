@@ -397,10 +397,6 @@ class Signal:
             raise ValueError(f"bar_index cannot be below -1, got {self.bar_index}")
         if self.evidence_score is not None and not 0.0 <= self.evidence_score <= 1.0:
             raise ValueError(f"evidence_score must be between 0 and 1, got {self.evidence_score}")
-        if self.bar_index < -1:
-            raise ValueError(f"bar_index cannot be below -1, got {self.bar_index}")
-        if self.evidence_score is not None and not 0.0 <= self.evidence_score <= 1.0:
-            raise ValueError(f"evidence_score must be between 0 and 1, got {self.evidence_score}")
 
     @property
     def symbol_normalised(self) -> str:
