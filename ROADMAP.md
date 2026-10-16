@@ -95,6 +95,9 @@ None of these touches, or needs, a live terminal.
   **done 2026-10-16 for the rest: `test_residual_branches.py` pins the albrooks,
   executor, config, logging and live refusals; a dead FLAT-direction branch was
   deleted. Suite total 100%.**
+* ~~**Shrink `HANDOFF.md`.**~~ **done 2026-10-16: per-phase narrative moved
+  verbatim to `docs/history/` (22 files, every one of the 3382 lines
+  accounted for); `HANDOFF.md` is the live state only.**
 
 ## Later (needs a decision, not just work)
 
