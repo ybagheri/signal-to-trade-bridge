@@ -6,7 +6,7 @@
     "correct -- because the fields were written with set_edit_text, which sets",
     "the control text without the keystroke messages MT5 commits on.",
     "",
-    "Measured 2026-10-15 on Alpari MT5 build 6230 (demo account 50000002) with",
+    "Measured 2026-10-15 on the Alpari MT5 demo account, build 6230, with",
     "read-only probes: open the order dialog, write a field, watch MT5's own",
     "committed-state labels, close the dialog. No Buy/Sell control was used.",
     "Finding: set_edit_text leaves the witness labels unmoved indefinitely",
