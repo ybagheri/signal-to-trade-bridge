@@ -1,0 +1,52 @@
+# The full quality gate on a clean Linux machine.
+#
+# Clean is the point: this runner has neither private repository (auto_trade,
+# albrooks) nor MetaTrader 5, so the suite runs exactly the way Phase 16 left
+# it -- every test that needs a missing piece skips with a stated reason, and
+# everything else must pass. A dependency on a private package here would fail
+# loudly at install time rather than silently narrowing the suite, which is
+# the failure this workflow exists to catch.
+#
+# The steps mirror scripts/test.sh one for one. The script itself is not used
+# because it prefers a .venv that CI never creates; duplicating five commands
+# beats a gate whose runner and whose documentation disagree about what runs.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install the project and the dev tools
+        run: pip install -e ".[dev]"
+
+      - name: ruff check
+        run: python -m ruff check .
+
+      - name: ruff format --check
+        run: python -m ruff format --check .
+
+      - name: mypy
+        run: python -m mypy
+
+      - name: pytest
+        run: python -m pytest -q
+
+      - name: domain isolation
+        run: python -m pytest tests/unit/test_domain_isolation.py -v --no-header

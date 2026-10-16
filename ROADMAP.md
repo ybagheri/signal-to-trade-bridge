@@ -65,10 +65,15 @@ one, and both READMEs no longer say "real-terminal check pending".
 
 None of these touches, or needs, a live terminal.
 
-* **Run `tests/integration` against the real `albrooks` engine** (nine tests that
-  have not run in several phases). Needs `ALBROOKS_PATH` and `scripts/setup.*`.
+* ~~**Run `tests/integration` against the real `albrooks` engine**~~ **done
+  2026-10-15: all 9 pass** against the installed engine
+  (`D:\Projects\al-brooks-price-action-engine`), no `ALBROOKS_PATH` needed.
 * **Run `requires_auto_trade` tests** (84 skips on a clean machine include them) on a
   machine with the private checkout, and keep the skip count recorded in `HANDOFF.md`.
+  2026-10-15: on this machine (both private checkouts installed) the suite is
+  **1326 passed, 6 skipped** -- the 6 skips are platform/installation facts with
+  stated reasons (file locking on Windows, an installed `MetaTrader5`, an unset
+  data path), not missing coverage.
 * **Rewrite git history if the repository is or will become public.** Earlier commits
   contain a demo login, an account-holder name and a Windows profile name that were
   removed from the working tree in Phase 16 but remain in history.
@@ -76,8 +81,11 @@ None of these touches, or needs, a live terminal.
   phases into `docs/history/` and keep the hand-off to current status, known issues and
   the protocol. Do this deliberately and in its own commit; it is the file future
   agents trust first.
-* **CI.** The suite now passes on a clean Linux machine, so `ruff`, `mypy` and `pytest`
-  can run in GitHub Actions without either private repository. Not yet set up.
+* ~~**CI.**~~ **done 2026-10-15: `.github/workflows/ci.yml`** runs the full gate
+  (`ruff check`, `ruff format --check`, `mypy`, `pytest`, domain isolation) on
+  Python 3.11 + 3.12, Ubuntu, with neither private repository installed.
+  Verified by replaying the gate in a throwaway venv here: 1263 passed,
+  86 skipped (every skip carries its reason).
 * **Cover the remaining gaps** behind the 93% figure (CLI error paths are the largest).
 
 ## Later (needs a decision, not just work)
