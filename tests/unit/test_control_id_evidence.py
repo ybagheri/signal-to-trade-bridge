@@ -130,7 +130,9 @@ class TestTheMeasurementIsBackedByEvidence:
     def test_every_identifier_this_project_depends_on_was_observed(self) -> None:
         # The specific controls, by the identifiers `live.py` will compare. A probe
         # that reported OK for the build but not for the order dialog's fields would
-        # satisfy `verdict` and still be useless, so the fields are named here.
+        # satisfy `verdict` and still be useless, so the fields are named here --
+        # including the commit witnesses the settle wait reads, which the order
+        # path depends on exactly as much as the fields it types into.
         record = json.loads(RECORD.read_text(encoding="utf-8"))
         seen = record["controls"]
         for control in (
@@ -138,6 +140,9 @@ class TestTheMeasurementIsBackedByEvidence:
             "volume",
             "stop_loss",
             "take_profit",
+            "volume_commit_label",
+            "stop_loss_commit_label",
+            "take_profit_commit_label",
             "buy",
             "sell",
         ):
@@ -149,9 +154,11 @@ class TestTheMeasurementIsBackedByEvidence:
         # **The record is checked against upstream's source, not trusted.** A
         # committed JSON file that drifts from the code it documents is worse than
         # none, and the identifiers it records are the ones an order would be typed
-        # into. Upstream keeps them in `control_probe.EXPECTED_FIELDS` and
-        # `EXPECTED_FINAL_CONTROLS`, which is where the order path reads them.
+        # into. Upstream keeps them in `control_probe.EXPECTED_FIELDS`,
+        # `EXPECTED_COMMIT_LABELS` and `EXPECTED_FINAL_CONTROLS`, which is where
+        # the order path reads them.
         from auto_trade.infrastructure.automation.control_probe import (
+            EXPECTED_COMMIT_LABELS,
             EXPECTED_FIELDS,
             EXPECTED_FINAL_CONTROLS,
         )
@@ -164,6 +171,11 @@ class TestTheMeasurementIsBackedByEvidence:
         # once gets ignored the second time, which is the failure mode this whole
         # file is about.
         for label, value in EXPECTED_FIELDS:
+            assert int(record[label]["identifier"]) == int(value), (
+                f"{label}: the record says {record[label]['identifier']}, upstream uses "
+                f"{value}. One of the two is stale."
+            )
+        for label, value in EXPECTED_COMMIT_LABELS:
             assert int(record[label]["identifier"]) == int(value), (
                 f"{label}: the record says {record[label]['identifier']}, upstream uses "
                 f"{value}. One of the two is stale."

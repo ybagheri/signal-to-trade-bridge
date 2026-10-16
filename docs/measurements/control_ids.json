@@ -13,10 +13,10 @@
     "update -- and only if the probe reports OK for every control."
   ],
   "measured_on_build": 6230,
-  "observed_at": "2026-10-02T08:27:54Z",
+  "observed_at": "2026-10-16T04:55:16Z",
   "command": "auto-trade terminal-check",
   "verdict": "OK",
-  "checked": 13,
+  "checked": 16,
   "drifted": [],
   "missing": [],
   "account_type": "DEMO",
@@ -35,6 +35,18 @@
     },
     "take_profit": {
       "identifier": "10336",
+      "status": "OK"
+    },
+    "volume_commit_label": {
+      "identifier": "10881",
+      "status": "OK"
+    },
+    "stop_loss_commit_label": {
+      "identifier": "11138",
+      "status": "OK"
+    },
+    "take_profit_commit_label": {
+      "identifier": "11139",
       "status": "OK"
     },
     "trade_grid": {

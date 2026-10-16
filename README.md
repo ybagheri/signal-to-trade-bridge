@@ -7,8 +7,8 @@ engine and an automated trading execution system, with explicit risk management,
 a default risk of **0.5% of account balance per trade**, and a default
 **1:1 risk/reward**.
 
-> **Status: Pre-alpha. Phases 0–14 complete; Phase 15 (the One Click Trading guard) is
-> wired and tested but not yet verified against a real terminal.** The default
+> **Status: Pre-alpha. Phases 0–16 complete; the order path is verified end to end
+> on a real demo terminal (Phase 15 closed, Phase 17 recorded).** The default
 > configuration cannot place an order. See [HANDOFF.md](HANDOFF.md) for exactly where
 > the project stands, [ROADMAP.md](ROADMAP.md) for what comes next, and
 > [docs/architecture.md](docs/architecture.md) for the design.
@@ -72,7 +72,7 @@ either.
 | 12 | Documentation, CLI, public API | ✅ complete |
 | 13 | Final architecture review | ✅ complete |
 | 14 | Arming the machine; first real demo order | ✅ complete — exposed the defect below |
-| 15 | One Click Trading guard | 🟡 wired + unit-tested; **real-terminal check pending** |
+| 15 | One Click Trading guard | ✅ verified on a real terminal; premise corrected (see below) |
 | 16 | Repository hygiene, test portability, doc sync | ✅ complete |
 
 **1184 tests passing, 84 skipped, 93% coverage** on a clean machine with neither
@@ -102,16 +102,21 @@ sending, and the default configuration still cannot send:
   defaults. Reaching `build_live()` requires a deliberate call with both changed,
   plus a `DEMO` account, a readable ledger and a clear kill switch.
 
-**Known defect, found by the first real orders and now guarded (Phase 15):** the first
-demo orders filled at the Trade panel's default volume with **no stop loss and no take
-profit**, while the order dialog read back exactly what was requested. The cause was
-not the field writes: with Algo Trading off, the terminal sends the Toolbox Trade
-panel's values rather than the ticket's, and that panel carries no stop. The executor
-now reads `terminal_info().trade_allowed` before the click and **refuses** any order
-carrying a stop or target when it is not `True`. The guard is covered by unit tests;
-it has **not yet been exercised against a live terminal**, and enabling Algo Trading
-remains the operator's decision, made by hand. See [HANDOFF.md](HANDOFF.md), Phases
-15–16.
+**Known defect, found by the first real orders and fixed after the guard's premise
+was falsified (Phases 15, 17):** the first demo orders filled at the Trade panel's
+default volume with **no stop loss and no take profit**, while the order dialog read
+back exactly what was requested. The One Click theory was wrong: the fills happened
+with Algo Trading on, and `trade_allowed` does not track the failure. The actual
+cause was the field writes -- upstream typed values with `set_edit_text`, which
+displays without committing to MT5's order state. Upstream now writes every field
+with real keystrokes and waits on MT5's own committed-state labels (`10881`,
+`11138`, `11139`) before the click, and the verifier compares the new position's
+stop and target against the approval instead of matching volume alone. A demo order
+after the fix carried 0.99 lots with the approved stop and target exactly; the
+measurement and the fill are recorded under `docs/measurements/`, pinned by
+`tests/unit/test_field_commit_evidence.py`. The `trade_allowed` refusal stays as a
+cheap pre-click guard, not the primary protection. Enabling Algo Trading remains
+the operator's decision, made by hand. See [HANDOFF.md](HANDOFF.md), Phases 15–17.
 
 A volume below the broker's minimum is
 refused rather than floored up, always.

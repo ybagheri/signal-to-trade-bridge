@@ -26,6 +26,9 @@ CONTROLS_OF_RECORD = (
     "volume",
     "stop_loss",
     "take_profit",
+    "volume_commit_label",
+    "stop_loss_commit_label",
+    "take_profit_commit_label",
     "final_control_buy",
     "final_control_sell",
     "trade_grid",
@@ -87,7 +90,16 @@ def main() -> int:
             # and got it wrong once.
             **{
                 label: {"identifier": rows[label]["expected"], "status": rows[label]["status"]}
-                for label in ("symbol", "volume", "stop_loss", "take_profit", "trade_grid")
+                for label in (
+                    "symbol",
+                    "volume",
+                    "stop_loss",
+                    "take_profit",
+                    "volume_commit_label",
+                    "stop_loss_commit_label",
+                    "take_profit_commit_label",
+                    "trade_grid",
+                )
             },
             **{
                 label: {

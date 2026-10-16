@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Durable record of the dialog-commit measurement and the live order that",
+    "proved the fix. The October 9 demo order went out at the Toolbox panel's",
+    "defaults (0.01 lots, no stop, no target) while every dialog field read back",
+    "correct -- because the fields were written with set_edit_text, which sets",
+    "the control text without the keystroke messages MT5 commits on.",
+    "",
+    "Measured 2026-10-15 on Alpari MT5 build 6230 (demo account 50000002) with",
+    "read-only probes: open the order dialog, write a field, watch MT5's own",
+    "committed-state labels, close the dialog. No Buy/Sell control was used.",
+    "Finding: set_edit_text leaves the witness labels unmoved indefinitely",
+    "(volume witness static through +2s and a TAB out of the field); real",
+    "keystrokes (select-all, then type) move them within half a second.",
+    "Upstream writes every order field with keystrokes since, and waits on",
+    "these witnesses before the click.",
+    "",
+    "The live order below is the proof on a real terminal: requested and",
+    "observed volume, stop and target are identical. Entry is intentionally",
+    "not compared -- market execution fills at the market price, so the entry",
+    "in the signal is informational and the fill price is whatever the market",
+    "was at the click.",
+    "",
+    "tests/unit/test_field_commit_evidence.py reads this file, mirroring",
+    "test_control_id_evidence.py: the witness identifiers must match upstream's",
+    "COMMIT_LABEL_FOR_FIELD, and the fill must show requested == observed."
+  ],
+  "measured_on_build": 6230,
+  "observed_at": "2026-10-15",
+  "account_type": "DEMO",
+  "method": "read-only dialog probes (no click) plus one live demo order",
+  "behavior": {
+    "set_edit_text": "display only; committed state keeps the defaults indefinitely",
+    "keystrokes": "committed; witnesses move within half a second"
+  },
+  "witnesses": {
+    "volume_commit_label": {
+      "identifier": "10881",
+      "uncommitted": "1 000 EUR",
+      "committed": "5 000 EUR"
+    },
+    "stop_loss_commit_label": {
+      "identifier": "11138",
+      "uncommitted": "",
+      "committed": "368 points, ~18 USD"
+    },
+    "take_profit_commit_label": {
+      "identifier": "11139",
+      "uncommitted": "",
+      "committed": "432 points, ~22 USD"
+    }
+  },
+  "live_fill": {
+    "signal_id": "stb-demo-003",
+    "executed_at": "2026-10-15T13:07:06Z",
+    "ticket": "389589852",
+    "symbol": "EURUSD",
+    "requested": {
+      "volume": "0.99",
+      "stop_loss": "1.11786",
+      "take_profit": "1.12386"
+    },
+    "observed": {
+      "volume": "0.99",
+      "stop_loss": "1.11786",
+      "take_profit": "1.12386"
+    }
+  }
+}

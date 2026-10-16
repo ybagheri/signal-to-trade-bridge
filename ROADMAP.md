@@ -53,11 +53,13 @@ person watching):
 
 ## Next
 
-### Phase 17 — close out Phase 15 (above) and record the evidence
+### Phase 17 — ~~close out Phase 15 (above) and record the evidence~~ done 2026-10-15
 
-Exit criteria: probe readings recorded under `docs/measurements/`, a test that reads
-that record the way `test_control_id_evidence.py` reads the control-id one, and the
-README's "real-terminal check pending" line removed.
+Probe readings recorded under `docs/measurements/` (`control_ids.json` now covers
+the three commit witnesses; `field_commit.json` records the SetValue-never-commits
+finding and the live fill of ticket 389589852), `test_field_commit_evidence.py`
+reads the new record the way `test_control_id_evidence.py` reads the control-id
+one, and both READMEs no longer say "real-terminal check pending".
 
 ## Doable without a terminal
 
