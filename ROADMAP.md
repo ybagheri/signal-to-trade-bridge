@@ -92,7 +92,9 @@ None of these touches, or needs, a live terminal.
   unreadable/unusable signal paths, the unwired-pipeline refusal, and both report
   blocks; `tests/unit/test_domain_validation_gaps.py` pins every constructor guard,
   and a duplicated validation block found on the way was deleted, not tested).
-  Suite total 99%.
+  **done 2026-10-16 for the rest: `test_residual_branches.py` pins the albrooks,
+  executor, config, logging and live refusals; a dead FLAT-direction branch was
+  deleted. Suite total 100%.**
 
 ## Later (needs a decision, not just work)
 
