@@ -325,6 +325,34 @@ class TestTheAssembly:
         assert bridge.can_execute is True
         assert bridge.refusal == ""
 
+    def test_the_assembly_itself_is_audited(
+        self, tmp_path: Path, stub_execution: _StubBindings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The remaining distinction between the safe path and this one is which
+        # function a caller reached for -- and no code shape can stop a caller
+        # from reaching. What it can do is leave a record, so the suite pins
+        # that assembling the live side writes one: after the fact, "when was
+        # this machine armed" must be answerable from the audit trail rather
+        # than from memory.
+        recorded: list[Any] = []
+
+        class _RecordingAudit:
+            def __init__(self, directory: Path) -> None:
+                recorded.append(directory)
+
+            def record(self, event: Any) -> None:
+                recorded.append(event)
+
+        monkeypatch.setattr("auto_trade.infrastructure.logging.audit.AuditLogger", _RecordingAudit)
+        self._build(tmp_path, stub_execution)
+        assembled = [
+            event for event in recorded if getattr(event, "event_type", None) == "assembled"
+        ]
+        assert len(assembled) == 1, "assembling the live side must audit itself exactly once"
+        assert assembled[0].component == "bridge"
+        assert "execution_enabled=True" in assembled[0].message
+        assert "dry_run=False" in assembled[0].message
+
     def test_the_workflow_receives_a_terminal_adapter_and_a_demo_gate(
         self, tmp_path: Path, stub_execution: Any, created: dict[str, Any] | None = None
     ) -> None:

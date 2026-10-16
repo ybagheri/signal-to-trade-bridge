@@ -74,9 +74,12 @@ None of these touches, or needs, a live terminal.
   **1326 passed, 6 skipped** -- the 6 skips are platform/installation facts with
   stated reasons (file locking on Windows, an installed `MetaTrader5`, an unset
   data path), not missing coverage.
-* **Rewrite git history if the repository is or will become public.** Earlier commits
-  contain a demo login, an account-holder name and a Windows profile name that were
-  removed from the working tree in Phase 16 but remain in history.
+* ~~**Rewrite git history.**~~ **done 2026-10-16 with `git filter-repo`.**
+  `BazikadeStore` → `Trader`, the account-holder name → `Demo Holder`, demo
+  logins → `5000000x` placeholders; author identity untouched. Verified by
+  scanning every blob in the object database (zero hits), full suite green
+  afterwards (1385 passed), then force-pushed. A local mirror backup was kept
+  at the time in case the rewrite needed reverting.
 * **Shrink `HANDOFF.md`.** It is ~190 KB, mostly per-phase narrative. Move closed
   phases into `docs/history/` and keep the hand-off to current status, known issues and
   the protocol. Do this deliberately and in its own commit; it is the file future
@@ -99,18 +102,31 @@ None of these touches, or needs, a live terminal.
   verbatim to `docs/history/` (22 files, every one of the 3382 lines
   accounted for); `HANDOFF.md` is the live state only.**
 
-## Later (needs a decision, not just work)
+## Later (decided 2026-10-16; the code follows the decision)
 
-* **Whether the One Click guard belongs in this project or upstream.** It sits
-  immediately before `workflow.execute`, which is right for this codebase, but
-  `auto-trade` owns the click and knows which panel it uses. A refusal here is honest and
-  cheap; a rule about a terminal capability arguably belongs beside the code that uses it.
-* **A runtime guard on `build_live`.** `build_bridge` is the safe path and `build_live`
-  is not, and that distinction is carried only by which function a caller reaches for.
-  If execution is ever turned on in earnest, review whether that is still the shape you
-  want.
-* **Upstream `AuditLogger` file-handle leak** (blocks log rotation in long-running
-  commands). Upstream's code; record or fix there.
+* ~~**Whether the One Click guard belongs in this project or upstream.**~~
+  **Decided: it stays here.** The falsification settled the premise question,
+  not the placement one. Upstream now commits fields properly and the verifier
+  checks protection, but neither of those refuses an order on a terminal that
+  is *genuinely* in one-click mode -- and only the bridge states the rule in
+  its own terms ("never send levels the terminal cannot carry"). It is a cheap
+  pre-click refusal with unit tests; moving it upstream would trade a tested
+  local rule for a second opinion in a codebase that has no such concept.
+* ~~**A runtime guard on `build_live`.**~~ **Decided and implemented: keep the
+  shape, audit the arming.** The env-var gates, the demo check, the ledger and
+  the kill switch *are* runtime guards, evaluated at assembly; the per-invocation
+  `--confirm-demo` covers the CLI. What was missing was not a sixth lock but a
+  record: `build_live` now writes one `assembled` audit event naming the
+  execution configuration, so "when was this machine armed" is answerable from
+  the trail rather than from memory. Pinned by
+  `test_the_assembly_itself_is_audited`.
+* ~~**Upstream `AuditLogger` file-handle leak.**~~ **Fixed upstream:
+  `AuditLogger.close()`** releases the file handlers it installed (idempotent,
+  leaves non-file handlers alone), with tests proving the handle is gone by
+  renaming the file -- the operation that raises `PermissionError` while it is
+  held. Long-running commands call it on shutdown; one-shot commands never
+  needed it. (The bridge holds only the bound `record` method, so there was
+  nothing to close on this side.)
 
 ## Deliberately out of scope
 

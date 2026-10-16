@@ -298,7 +298,7 @@ def build_live(
     # terminal (it answers whether the order's stop can be carried). Passing one in the
     # other's place is what left the One Click Trading guard inert -- see HANDOFF,
     # Phase 15 -- so `_finish` takes them by name.
-    return _finish(
+    bridge = _finish(
         config,
         risk,
         account,
@@ -310,6 +310,27 @@ def build_live(
         audit=audit,
         workflow=workflow,
     )
+    # The assembly itself is audited, because the remaining distinction between
+    # the safe path and this one is which function a caller reached for -- and
+    # no code shape can stop a caller from reaching. What it can do is leave a
+    # record: after the fact, "when was this machine armed and with what
+    # configuration" must be answerable from the audit trail rather than from
+    # memory. This is observability, not a sixth gate; every gate above still
+    # refuses on its own.
+    from auto_trade.domain.models import AuditEvent
+
+    audit(
+        AuditEvent(
+            component="bridge",
+            event_type="assembled",
+            message=(
+                "live side assembled "
+                f"(execution_enabled={config.execution_enabled}, "
+                f"dry_run={config.dry_run})"
+            ),
+        )
+    )
+    return bridge
 
 
 def _live_side(bindings: Any, config: BridgeConfig, ledger: Any) -> tuple[Any, Any, Any]:
