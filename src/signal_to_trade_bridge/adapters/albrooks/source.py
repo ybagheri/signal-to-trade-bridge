@@ -28,7 +28,7 @@ from signal_to_trade_bridge.adapters.albrooks.mapper import (
     AnalysisOutcome,
     map_result_to_signal,
 )
-from signal_to_trade_bridge.domain.enums import Direction, SignalAction
+from signal_to_trade_bridge.domain.enums import SignalAction
 from signal_to_trade_bridge.domain.errors import InvalidSignalError
 from signal_to_trade_bridge.domain.models import Signal
 from signal_to_trade_bridge.infrastructure.logging import Event, get_logger
@@ -431,8 +431,10 @@ def abstention_reason(signal: Signal) -> str:
             signal.source_metadata.get("source_reason")
             or "a condition the engine states is not met"
         )
-    if signal.direction is Direction.FLAT:
-        return "the signal names a tradable action but no direction"
+    # No FLAT-direction branch: a tradable action with a flat direction cannot
+    # be constructed (`Signal.__post_init__` refuses it) and both abstentions
+    # return above, so there is no reachable state left to describe. A branch
+    # for it would be dead code asserting something about nothing.
     return ""
 
 

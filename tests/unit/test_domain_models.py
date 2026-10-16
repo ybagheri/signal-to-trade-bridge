@@ -65,6 +65,16 @@ class TestDirection:
         assert not Direction.FLAT.is_tradable
 
 
+class TestDecisionAction:
+    def test_only_execute_is_tradable(self) -> None:
+        # The property `process()` and the CLI both read to decide whether
+        # anything reaches the executor. A `DRY_RUN` that read as tradable
+        # would send; a `NO_TRADE` that did would be a contradiction.
+        assert DecisionAction.EXECUTE.is_tradable
+        assert not DecisionAction.DRY_RUN.is_tradable
+        assert not DecisionAction.NO_TRADE.is_tradable
+
+
 class TestSignalAction:
     def test_both_abstentions_are_flat(self) -> None:
         # WAIT and NO_TRADE are different upstream claims, but neither asks for a

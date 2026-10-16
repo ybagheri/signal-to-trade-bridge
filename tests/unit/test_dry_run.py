@@ -36,6 +36,7 @@ from signal_to_trade_bridge.adapters.auto_trade.executor import _ORDER_ACTIONS a
 from signal_to_trade_bridge.application import dry_run as dry_run_module
 from signal_to_trade_bridge.application.dry_run import (
     DownstreamVerdict,
+    DryRunReport,
     build_execution_request,
     default_comment,
     direction_word,
@@ -255,6 +256,25 @@ class TestFailClosed:
         # this class was written to prevent.
         report = report_for(_intent(), execution_enabled=False, dry_run=True, ask_downstream=None)
         assert any("not evaluated" in b for b in report.blockers())
+
+    def test_a_report_without_a_request_names_it_as_a_blocker(self) -> None:
+        # `report_for` always builds a request since Phase 9, so this state is
+        # only reachable by hand -- and a hand-built report that silently
+        # omitted the order it claims to describe would be worse than the
+        # refusal below, which names exactly what is missing.
+        report = DryRunReport(
+            request=None,
+            risk_amount=Decimal("50.00"),
+            planned_loss=Decimal("50.00"),
+            reward_to_risk=Decimal("1.0"),
+            volume=Decimal("0.16"),
+            downstream=DownstreamVerdict.not_evaluated("no engine wired"),
+            execution_enabled=False,
+            dry_run=True,
+            balance=Decimal("10000.00"),
+            currency="USD",
+        )
+        assert any("could not be expressed" in b for b in report.blockers())
 
     def test_an_unevaluated_verdict_cannot_be_accepted(self) -> None:
         # A construction error, not a normalisation. An unevaluated gate that

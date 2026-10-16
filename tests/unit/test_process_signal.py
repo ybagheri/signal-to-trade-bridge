@@ -212,6 +212,38 @@ class TestTheHappyPath:
         assert payload["intent"]["position_size"]["volume"] == "0.16"
 
 
+class TestGeometryIsWiredAsABackstop:
+    def test_a_resolved_target_on_the_wrong_side_is_refused_at_geometry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The resolvers subsume every geometric failure by design: a wrong-side
+        # signal target is refused or replaced before geometry ever sees it. So
+        # the only way to exercise this refusal through `process` is to hand it
+        # a resolved value no resolver would produce -- which is exactly what
+        # pins that the stage exists and is wired, rather than that the
+        # resolvers happen to agree today.
+        import signal_to_trade_bridge.application.process_signal as pipeline_module
+        from signal_to_trade_bridge.domain.models import TakeProfit
+        from signal_to_trade_bridge.domain.resolution import resolved
+        from signal_to_trade_bridge.domain.take_profit import TakeProfitSource
+
+        bad_target = TakeProfit(
+            price=Decimal("1.09900"),
+            distance=Decimal("0.00300"),
+            source=TakeProfitSource.SIGNAL,
+            basis="SWING",
+        )
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_take_profit",
+            lambda *args: resolved(bad_target),
+        )
+        pipeline, _, _ = _pipeline()
+        decision = pipeline.process(_signal())
+        assert decision.action is DecisionAction.NO_TRADE
+        assert decision.diagnostics["stage"] == "geometry"
+
+
 class TestTheOrderIsTheDesign:
     def test_the_stages_are_named_in_the_order_they_run(self) -> None:
         # The tuple is the documented order, and `process` is the only thing that
